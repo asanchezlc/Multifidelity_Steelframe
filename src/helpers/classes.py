@@ -23,10 +23,11 @@ class StoryLevel:
     ky2: Any
     b: Any
     h: Any
-    A_b: Any                 # beam area (m^2) for corner mass from beam
-    L_b: Any  # beam length (m) for corner mass from beam (e.g., B)
+    A_b_B: Any                 # beam area (m^2) for corner mass from beam along B
+    A_b_H: Any                 # beam area (m^2) for corner mass from beam along H
     is_highest_level: bool
     m_center_extra: Any = 0  # e.g., equipment at center (kg)
+    m_corner_extra: Any = 0  # e.g., equipment at center (kg)
 
     # Derived / Outputs    # Derived (not passed at init)
     A_col: Any = field(init=False)
@@ -44,13 +45,15 @@ class StoryLevel:
 
     def _masses_corner(self) -> Any:
         """Returns total corner mass per corner."""
-        m_corner_b = outils.lumped_mass_from_beam(self.rho, self.A_b, self.L_b)
+        m_corner_b_B = outils.lumped_mass_from_beam(self.rho, self.A_b_B, self.B)
+        m_corner_b_H = outils.lumped_mass_from_beam(self.rho, self.A_b_H, self.H)
         m_half_col = outils.lumped_mass_from_beam(
             self.rho, self.A_col, self.Lc)
+        m_extra = self.m_corner_extra
         if self.is_highest_level:
-            m_corner = m_corner_b + m_half_col
+            m_corner = m_corner_b_B + m_corner_b_H + m_half_col + m_extra
         else:
-            m_corner = m_corner_b + 2 * m_half_col
+            m_corner = m_corner_b_B + m_corner_b_H + 2 * m_half_col + m_extra
         return m_corner
 
     def build_stiffness(self):
@@ -68,8 +71,9 @@ class StoryLevel:
                                                 m_corner=m_corner, m_center=m_center)
         return self.M_level
 
-    def level_diagonals(self) -> Tuple[Any, Any, Any]:
-        """Return (kx, ky, kt) for assembling the interstory global K (between this level and the one below)."""
+    def level_diagonals(self) -> Tuple[Any, Any, Any, Any, Any, Any]:
+        """Return (kx, ky, kt, mx, my, mt) for assembling the interstory global K and M
+        (between this level and the one below)."""
         # If K_level is already computed and numeric/symbolic, extract diagonals; otherwise, recompute quickly
         if self.K_level is None:
             self.build_stiffness()

@@ -135,6 +135,10 @@ K_beam_strong = outils.beam_stiffness(E, I1, L_c)
 K_beam_weak = K_beam_weak[np.ix_([2, 3], [2, 3])]
 K_beam_strong = K_beam_strong[np.ix_([2, 3], [2, 3])]
 
+id_BODY1 = [Phi_id_K_M.index('CBODY1_U1') ,Phi_id_K_M.index('CBODY2_U1')]
+id_BODY2 = [Phi_id_K_M.index('CBODY1_U2') ,Phi_id_K_M.index('CBODY2_U2')]
+id_BODY3 = [Phi_id_K_M.index('CBODY1_R3') ,Phi_id_K_M.index('CBODY2_R3')]
+
 # id_BODY = [0,1,17]
 # id_BODY = [Phi_id_K_M.index('9_U1') ,Phi_id_K_M.index('9_U2'),Phi_id_K_M.index('9_R3')]
 # id_BODY1 = [Phi_id_K_M.index('CBODY1_U1') ,Phi_id_K_M.index('CBODY1_U2'),Phi_id_K_M.index('CBODY1_R3')]
