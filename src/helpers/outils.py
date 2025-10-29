@@ -4,7 +4,7 @@ import shutil
 
 import numpy as np
 import pandas as pd
-import sympy as sp
+import sympy as sym
 
 import helpers.sap2000 as sap2000
 
@@ -439,6 +439,42 @@ def get_modal_properties_from_K_M(K, M, tol=1e-10):
     return f, phi
 
 
+def static_condensation(K, slave_dofs, F=None):
+    """
+    Static condensation of a matrix K eliminating the DOFs in slave_dofs.
+    """
+    # K = sym.Matrix(K)
+    n = K.shape[0] if hasattr(K, 'shape') else len(K)
+    Islaves = sorted(set(slave_dofs))
+    Imasters = sorted(set(range(n)) - set(Islaves))
+    if isinstance(K, sym.MatrixBase):
+        K = sym.Matrix(K)
+        # Blocs
+        Kmm = K.extract(Imasters, Imasters)
+        Kms = K.extract(Imasters, Islaves)
+        Ksm = K.extract(Islaves, Imasters)
+        Kss = K.extract(Islaves, Islaves)
+
+        # Condensation
+        X = Kss.LUsolve(Ksm) if Kss.shape[0] > 0 else sym.zeros(0, len(Imasters))
+        Kc = Kmm - Kms * X
+
+    elif isinstance(K, np.ndarray):
+        K = np.array(K, dtype=float, copy=False)
+        Isl = np.array(Islaves, dtype=int)
+        Ima = np.array(Imasters, dtype=int)
+
+        Kee = K[np.ix_(Ima, Ima)]
+        Kei = K[np.ix_(Ima, Isl)]
+        Kie = K[np.ix_(Isl, Ima)]
+        Kii = K[np.ix_(Isl, Isl)]
+
+        X = np.linalg.solve(Kii, Kie)
+        Kc = Kee - Kei @ X
+
+    return Kc, Imasters
+
+
 def beam_stiffness(E, I, L):
     """B-E beam element stiffness matrix for bending in a single plane."""
     k = (E * I) / (L**3)
@@ -453,6 +489,85 @@ def beam_stiffness(E, I, L):
 
 def _is_symbolic(*vals) -> bool:
     return any(getattr(v, "free_symbols", set()) for v in vals)
+
+
+def k_beam(E, I, Le):
+    """
+    Local stiffness matrix for a Euler-Bernoulli beam.
+    """
+    EI = E*I
+    return (EI/Le**3)*sym.Matrix([
+        [12,    6*Le,  -12,    6*Le],
+        [6*Le,  4*Le**2, -6*Le, 2*Le**2],
+        [-12,   -6*Le,  12,   -6*Le],
+        [6*Le,  2*Le**2, -6*Le, 4*Le**2]
+    ])
+
+
+def k_beam_rotational_springs(E, I, L, k1, k2):
+    """
+    Local stiffness matrix for a Euler-Bernoulli beam with rotational springs
+
+    Delta = 12*E**2*I**2 + 4*E*I*L*(k1 + k2) + L**2*k1*k2
+    """
+    Delta = 12*E**2*I**2 + 4*E*I*L*(k1 + k2) + L**2*k1*k2
+    EI = E*I
+
+    K11 = 12*EI*(EI*(k1 + k2) + L*k1*k2) / (Delta*L**2)
+    K12 = 6*EI*k1*(2*EI + L*k2) / (Delta*L)
+    K13 = -K11
+    K14 = 6*EI*k2*(2*EI + L*k1) / (Delta*L)
+
+    K22 = 4*EI*k1*(3*EI + L*k2) / Delta
+    K23 = -K12
+    K24 = 2*EI*L*k1*k2 / Delta
+
+    K33 = K11
+    K34 = -K14
+
+    K44 = 4*EI*k2*(3*EI + L*k1) / Delta
+
+    K4 = sym.Matrix([
+        [K11, K12, K13, K14],
+        [K12, K22, K23, K24],
+        [K13, K23, K33, K34],
+        [K14, K24, K34, K44],
+    ])
+    return sym.simplify(K4)
+
+
+def k_beam_rotational_springs_with_delta(E, I, L, k1, k2):
+    """
+    Local stiffness matrix for a Euler-Bernoulli beam with rotational springs
+
+    Delta = 12*E**2*I**2 + 4*E*I*L*(k1 + k2) + L**2*k1*k2
+
+    Obtained in the "equations_beam_rotational_k.py" file.
+    """
+    Delta = sym.symbols('Delta')
+    EI = E*I
+
+    K11 = 12*EI*(EI*(k1 + k2) + L*k1*k2) / (Delta*L**2)
+    K12 = 6*EI*k1*(2*EI + L*k2) / (Delta*L)
+    K13 = -K11
+    K14 = 6*EI*k2*(2*EI + L*k1) / (Delta*L)
+
+    K22 = 4*EI*k1*(3*EI + L*k2) / Delta
+    K23 = -K12
+    K24 = 2*EI*L*k1*k2 / Delta
+
+    K33 = K11
+    K34 = -K14
+
+    K44 = 4*EI*k2*(3*EI + L*k1) / Delta
+
+    K4 = sym.Matrix([
+        [K11, K12, K13, K14],
+        [K12, K22, K23, K24],
+        [K13, K23, K33, K34],
+        [K14, K24, K34, K44],
+    ])
+    return sym.simplify(K4)
 
 
 def column_lateral_stiffness(E, I, L, k_lower, k_upper):
@@ -477,7 +592,22 @@ def column_lateral_stiffness(E, I, L, k_lower, k_upper):
     # F/u with u=1 at the top, u=0 at the base; symmetric spring supports
     k = base * (12 - 36*(4 + a1 + a2) / (12 + 4*(a1 + a2) + a1*a2))
 
-    return sp.simplify(sp.factor(sp.together(k))) if _is_symbolic(E, I, L, k_lower, k_upper) else k
+    return sym.simplify(sym.factor(sym.together(k))) if _is_symbolic(E, I, L, k_lower, k_upper) else k
+
+
+def column_lateral_stiffness_with_beam_in_flexion(E, I_c, I_b, h, L, k1, k2):
+    """
+    Returns lateral stiffness of a column belonging to a frame with:
+    - Two columns modeled as Euler-Bernoulli beams with rotational springs at both ends
+    and clamped supports
+    - One beam modeled as Euler-Bernoulli beam (no springs)
+    - Infinite axial rigidity
+
+    Remark: obtained in equations_frame_beam_rotational_k.py
+    """
+    k_x_frame = 12*E*I_c*(6*E*I_b*I_c*k1 + 6*E*I_b*I_c*k2 + 6*I_b*h*k1*k2 + I_c*L*k1*k2)/(h**2*(36*E**2*I_b*I_c**2 + 12*E*I_b*I_c*h*k1 + 12*E*I_b*I_c*h*k2 + 6*E*I_c**2*L*k2 + 3*I_b*h**2*k1*k2 + 2*I_c*L*h*k1*k2))
+    k_x = k_x_frame / 2
+    return k_x
 
 
 def stiffness_matrix_level(E, I1, I2, Lc, kx1, kx2, ky1, ky2, B, H):
@@ -508,14 +638,56 @@ def stiffness_matrix_level(E, I1, I2, Lc, kx1, kx2, ky1, ky2, B, H):
     K_yy = 4 * k_col_y
     K_tt = k_col_x * H**2 + k_col_y * B**2
 
-    K_sym = sp.Matrix([[K_xx, 0, 0],
+    K_sym = sym.Matrix([[K_xx, 0, 0],
                        [0,   K_yy, 0],
                        [0,     0,  K_tt]])
 
     if _is_symbolic(E, I1, I2, Lc, kx1, kx2, ky1, ky2, B, H, k_col_x, k_col_y):
         # Simplify entry-wise to keep expressions compact
         K_simpl = K_sym.applyfunc(
-            lambda e: sp.simplify(sp.factor(sp.together(e))))
+            lambda e: sym.simplify(sym.factor(sym.together(e))))
+        return K_simpl
+    else:
+        return np.array(K_sym.tolist(), dtype=float)
+
+
+def stiffness_matrix_level_beam_in_flexion(E, Ic_y, Ic_x, Lc, Ib_1_y, Ib_2_y, kx1, kx2, ky1, ky2, B, H):
+    """
+    Story stiffness matrix K_level for a 3D frame accounting for:
+        - Beam stiffness
+        - Rotational spring for column
+
+    Inputs:
+        E, I1, I2 : material/section properties (I1 about x-axis, I2 about y-axis)
+        Lc        : story height
+        kx1, kx2  : rotational springs about x at bottom/top (affect bending in y -> Uy)
+        ky1, ky2  : rotational springs about y at bottom/top (affect bending in x -> Ux)
+        B, H      : diaphragm plan dimensions (B along x, H along y)
+
+    Returns:
+        - SymPy Matrix with simplified entries if symbols are present.
+        - numpy.ndarray (float) if all inputs are numeric.
+
+    Remark:
+        Obtained in file 1_equations_2_lumped_model.py.
+    """
+    # Column lateral stiffness in each global translation
+    k_col_x = column_lateral_stiffness_with_beam_in_flexion(E, Ic_y, Ib_1_y, Lc, B, ky1, ky2)  # governs Ux
+    k_col_y = column_lateral_stiffness_with_beam_in_flexion(E, Ic_x, Ib_2_y, Lc, H, kx1, kx2)   # governs Uy
+
+    # Diagonal story stiffness (symmetry -> no couplings)
+    K_xx = 4 * k_col_x
+    K_yy = 4 * k_col_y
+    K_tt = k_col_x * H**2 + k_col_y * B**2
+
+    K_sym = sym.Matrix([[K_xx, 0, 0],
+                       [0,   K_yy, 0],
+                       [0,     0,  K_tt]])
+
+    if _is_symbolic(E, Ic_y, Ic_x, Lc, Ib_1_y, Ib_2_y, kx1, kx2, ky1, ky2, B, H):
+        # Simplify entry-wise to keep expressions compact
+        K_simpl = K_sym.applyfunc(
+            lambda e: sym.simplify(sym.factor(sym.together(e))))
         return K_simpl
     else:
         return np.array(K_sym.tolist(), dtype=float)
@@ -911,7 +1083,7 @@ def mass_matrix_level(rho, t, B, H, m_corner=0, m_center=0):
     M12, M13, M23 = 0, 0, 0
     M33 = I_center
 
-    M_sym = sp.Matrix([
+    M_sym = sym.Matrix([
         [M11,  M12, M13],
         [M12,  M22, M23],
         [M13,  M23, M33]
@@ -919,7 +1091,7 @@ def mass_matrix_level(rho, t, B, H, m_corner=0, m_center=0):
 
     # Symbolic vs numeric return
     if _is_symbolic(rho, t, B, H, m_corner, m_center):
-        return M_sym.applyfunc(lambda e: sp.simplify(sp.together(sp.factor(e))))
+        return M_sym.applyfunc(lambda e: sym.simplify(sym.together(sym.factor(e))))
     else:
         return np.array(M_sym.tolist(), dtype=float)
 
@@ -964,11 +1136,11 @@ def _build_tridiag_from_interstories(k_list: Sequence[Any]):
     off = [-k_list[i + 1] for i in range(N - 1)]
 
     if symb:
-        K = sp.zeros(N)
+        K = sym.zeros(N)
         for i in range(N):
-            K[i, i] = sp.simplify(sp.together(sp.factor(diag[i])))
+            K[i, i] = sym.simplify(sym.together(sym.factor(diag[i])))
         for i in range(N - 1):
-            K[i, i + 1] = -sp.simplify(sp.together(sp.factor(k_list[i + 1])))
+            K[i, i + 1] = -sym.simplify(sym.together(sym.factor(k_list[i + 1])))
             K[i + 1, i] = K[i, i + 1]
         return K
     else:
@@ -993,9 +1165,9 @@ def _build_diag_from_levels(val_list):
     symb = _is_symbolic(*val_list)
 
     if symb:
-        D = sp.zeros(N)
+        D = sym.zeros(N)
         for i, v in enumerate(val_list):
-            D[i, i] = sp.simplify(sp.together(sp.factor(v)))
+            D[i, i] = sym.simplify(sym.together(sym.factor(v)))
         return D
     else:
         D = np.zeros((N, N), dtype=float)
@@ -1009,7 +1181,7 @@ def assemble_interstory_global_from_levels(levels):
     Assemble the global interstory stiffness K (3N x 3N) with DOF order:
     [Ux_1..Ux_N | Uy_1..Uy_N | Thetaz_1..Thetaz_N].
 
-    levels is a list of StoryLevel objects.
+    levels is a list of StoryLevelRigidBeam objects.
     """
     N = len(levels)
 
@@ -1042,8 +1214,8 @@ def assemble_interstory_global_from_levels(levels):
 
     # block-diagonal with order [X-block | Y-block | Theta-block]
     if symb:
-        K = sp.BlockDiagMatrix(Kx, Ky, Kt)
-        M = sp.BlockDiagMatrix(Mx, My, Mt)       
+        K = sym.BlockDiagMatrix(Kx, Ky, Kt)
+        M = sym.BlockDiagMatrix(Mx, My, Mt)       
     else:
         K = np.zeros((3*N, 3*N))
         K[0:N, 0:N] = Kx
@@ -1055,3 +1227,52 @@ def assemble_interstory_global_from_levels(levels):
         M[2*N:3*N,   2*N:3*N]   = Mt
 
     return K, M, dofs
+
+
+def prune_K_and_Phi(K: np.ndarray, Phi_id_K_M: list[str]):
+    """
+    Elimina de K las filas/columnas que son todo ceros
+    y elimina las entradas correspondientes de Phi_id_K_M.
+
+    Parámetros
+    ----------
+    K : np.ndarray (matriz cuadrada)
+    Phi_id_K_M : list[str] con misma longitud que K.shape[0]
+
+    Returns
+    -------
+    K_reduced : np.ndarray
+    Phi_reduced : list[str]
+    mask_kept : np.ndarray[bool]  # por si luego quieres mapear índices originales
+    """
+    nonzero_rows = ~(np.all(K == 0, axis=1))
+    nonzero_cols = ~(np.all(K == 0, axis=0))
+    keep_mask = nonzero_rows & nonzero_cols
+    K_reduced = K[np.ix_(keep_mask, keep_mask)]
+    Phi_reduced = [phi for phi, keep in zip(Phi_id_K_M, keep_mask) if keep]
+
+    return K_reduced, Phi_reduced, keep_mask
+
+
+def generalized_eig_singular(M, K, tol=1e-12):
+    # SVD de la matriz de masa
+    U, s, _ = np.linalg.svd(M)
+
+    # Determinar rango efectivo
+    r = np.sum(s > tol)
+
+    # Base ortonormal del subespacio de rango
+    Ur = U[:, :r]
+
+    # Proyección de las matrices
+    M_r = Ur.T @ M @ Ur
+    K_r = Ur.T @ K @ Ur
+
+    # Resolver el problema generalizado en el subespacio reducido
+    lam, phi_r = eigh(K_r, M_r)
+
+    # Reconstruir modos en espacio original
+    phi = Ur @ phi_r
+    f = np.sqrt(np.abs(lam)) / (2*np.pi)  # frecuencias en Hz
+
+    return f, phi

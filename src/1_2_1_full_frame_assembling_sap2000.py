@@ -4,6 +4,10 @@ import numpy as np
 import helpers.outils as outils
 import helpers.sap2000 as sap2000
 
+"""
+File used to extract K M matrices from SAP2000 model considering rigid diaphragms.
+"""
+
 sapfile_name = "model_1_frame_2_levels.sdb"
 path = r"C:\Users\User\Documents\DOCTORADO\Multifidelity_Steelframe\sap2000"
 
