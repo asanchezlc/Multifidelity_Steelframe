@@ -125,12 +125,12 @@ f2, phi2 = outils.generalized_eig_singular(M_level, K_level)
 
 # id_U2 = [1, 5]
 # K_U2 = K[np.ix_(id_U2, id_U2)]
-# K_i = outils.beam_stiffness(E, I2, L_c)
+# K_i = outils.beam_stiffness_np(E, I2, L_c)
 # K = outils.reorder_K_M_matrix_to_phi_id(
 #     stiffness_matrix, ['2_U2', '2_R3'], joints_matrix_index)
 
-K_beam_weak = outils.beam_stiffness(E, I2, L_c)
-K_beam_strong = outils.beam_stiffness(E, I1, L_c)
+K_beam_weak = outils.beam_stiffness_np(E, I2, L_c)
+K_beam_strong = outils.beam_stiffness_np(E, I1, L_c)
 
 K_beam_weak = K_beam_weak[np.ix_([2, 3], [2, 3])]
 K_beam_strong = K_beam_strong[np.ix_([2, 3], [2, 3])]

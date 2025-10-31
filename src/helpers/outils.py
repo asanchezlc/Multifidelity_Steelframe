@@ -1,4 +1,5 @@
 
+import re
 import os
 import shutil
 
@@ -475,7 +476,7 @@ def static_condensation(K, slave_dofs, F=None):
     return Kc, Imasters
 
 
-def beam_stiffness(E, I, L):
+def beam_stiffness_np(E, I, L):
     """B-E beam element stiffness matrix for bending in a single plane."""
     k = (E * I) / (L**3)
     K = k * np.array([
@@ -487,11 +488,94 @@ def beam_stiffness(E, I, L):
     return K
 
 
+def assemble_global_beam_sym(E, I, Le, n_el, keep_factor=True, simplify_result=True):
+    """
+    Ensambla la matriz de rigidez global (simbólica) para n_el elementos EB en serie.
+    - Nodos = n_el + 1, 2 GDL por nodo: [w_i, theta_i]
+    Devuelve:
+      K_full  : matriz global completa de tamaño (2*(n_el+1)) x (2*(n_el+1))
+      map_dof : lista con el significado de cada DOF global (tupla (node, dof_name))
+    """
+    k = beam_stiffness_sym(E, I, Le)
+    n_nodes = n_el + 1
+    ndof = 2 * n_nodes
+    K = sym.zeros(ndof, ndof)
+
+    # Ensamblaje por superposición
+    for e in range(n_el):
+        dofs = [2*e, 2*e+1, 2*e+2, 2*e+3]  # [w_e, θ_e, w_{e+1}, θ_{e+1}]
+        for i in range(4):
+            for j in range(4):
+                K[dofs[i], dofs[j]] += k[i, j]
+
+    if simplify_result:
+        K = sym.simplify(K)
+
+    if keep_factor:
+        factor = (E*I)/(Le**3)
+        K = sym.simplify(K / factor) * factor  # mantiene explícito EI/Le^3
+
+    map_dof = [(i//2, 'w' if i % 2 == 0 else 'theta') for i in range(ndof)]
+    return K, map_dof
+
+
+def assemble_global_beam_np(E, I, Le, n_el):
+    """
+    Ensambla la matriz de rigidez global (numérica) para n_el elementos EB en serie.
+    - Nodos = n_el + 1, 2 GDL por nodo: [w_i, theta_i]
+    Devuelve:
+      K_full  : matriz global completa de tamaño (2*(n_el+1)) x (2*(n_el+1))
+      map_dof : lista con el significado de cada DOF global (tupla (node, dof_name))
+    """
+    k = beam_stiffness_np(E, I, Le)        # 4x4 numérica
+    n_nodes = n_el + 1
+    ndof = 2 * n_nodes
+    K = np.zeros((ndof, ndof), dtype=float)
+
+    # Ensamblaje por superposición
+    for e in range(n_el):
+        dofs = [2*e, 2*e+1, 2*e+2, 2*e+3]  # [w_e, θ_e, w_{e+1}, θ_{e+1}]
+        for i in range(4):
+            for j in range(4):
+                K[dofs[i], dofs[j]] += k[i, j]
+
+    map_dof = [(i//2, 'w' if i % 2 == 0 else 'theta') for i in range(ndof)]
+    return K, map_dof
+
+
+def reduce_cantilever_sym(K_full):
+    """
+    Aplica el empotramiento en el nodo 0 (w0 = theta0 = 0).
+    Devuelve:
+      K_red   : submatriz de rigidez en los GDL libres
+      free_ix : índices globales de los GDL libres (corresponden a K_red)
+    """
+    ndof = K_full.shape[0]
+    fixed = [0, 1]                 # w0, theta0
+    free_ix = [i for i in range(ndof) if i not in fixed]
+    K_red = K_full.extract(free_ix, free_ix)
+    return K_red, free_ix
+
+
+def reduce_cantilever_np(K_full):
+    """
+    Aplica el empotramiento en el nodo 0 (w0 = theta0 = 0).
+    Devuelve:
+      K_red   : submatriz de rigidez en los GDL libres
+      free_ix : índices globales de los GDL libres (corresponden a K_red)
+    """
+    ndof = K_full.shape[0]
+    fixed = [0, 1]  # w0, theta0
+    free_ix = [i for i in range(ndof) if i not in fixed]
+    K_red = K_full[np.ix_(free_ix, free_ix)]
+    return K_red, free_ix
+
+
 def _is_symbolic(*vals) -> bool:
     return any(getattr(v, "free_symbols", set()) for v in vals)
 
 
-def k_beam(E, I, Le):
+def beam_stiffness_sym(E, I, Le):
     """
     Local stiffness matrix for a Euler-Bernoulli beam.
     """
@@ -570,7 +654,7 @@ def k_beam_rotational_springs_with_delta(E, I, L, k1, k2):
     return sym.simplify(K4)
 
 
-def column_lateral_stiffness(E, I, L, k_lower, k_upper):
+def column_lateral_stiffness_rot_springs(E, I, L, k_lower, k_upper):
     """
     Lateral stiffness of a column modeled as an Euler-Bernoulli beam
     with rotational springs at both ends.
@@ -595,6 +679,40 @@ def column_lateral_stiffness(E, I, L, k_lower, k_upper):
     return sym.simplify(sym.factor(sym.together(k))) if _is_symbolic(E, I, L, k_lower, k_upper) else k
 
 
+def column_stiffness(E, I, L):
+    """
+    Lateral stiffness of a column modeled as an Euler-Bernoulli beam
+
+    Inputs:
+        E, I : material/section properties
+        L        : story height
+
+    Returns:
+        - SymPy Matrix with simplified entries if symbols are present.
+        - numpy.ndarray (float) if all inputs are numeric.
+    """
+    k = 12 * E * I / L**3
+
+    return sym.simplify(sym.factor(sym.together(k))) if _is_symbolic(E, I, L) else k
+
+
+def column_stiffness_in_frame(E, Ic, Lc, Ib, Lb):
+    """
+    Lateral stiffness of a column modeled as an Euler-Bernoulli beam
+    in a frame with a beam not infinitely rigid.
+
+    See: "Optimal beam-to-column stiffness ratio of portal frames
+    under lateral loads" (Pedro Silva et al) [or derive it from
+    static condensation of a frame]
+    """
+    alpha = Ib / Ic
+    kappa = Lb / Lc
+    k = (6 * alpha + kappa) / (6 * alpha + 4 * kappa) * (24 * E * Ic / Lc**3)  # frame stiffness
+    k = k / 2  # column stiffness
+
+    return sym.simplify(sym.factor(sym.together(k))) if _is_symbolic(E, Ic, Lc, Ib, Lb) else k
+
+
 def column_lateral_stiffness_with_beam_in_flexion(E, I_c, I_b, h, L, k1, k2):
     """
     Returns lateral stiffness of a column belonging to a frame with:
@@ -608,6 +726,72 @@ def column_lateral_stiffness_with_beam_in_flexion(E, I_c, I_b, h, L, k1, k2):
     k_x_frame = 12*E*I_c*(6*E*I_b*I_c*k1 + 6*E*I_b*I_c*k2 + 6*I_b*h*k1*k2 + I_c*L*k1*k2)/(h**2*(36*E**2*I_b*I_c**2 + 12*E*I_b*I_c*h*k1 + 12*E*I_b*I_c*h*k2 + 6*E*I_c**2*L*k2 + 3*I_b*h**2*k1*k2 + 2*I_c*L*h*k1*k2))
     k_x = k_x_frame / 2
     return k_x
+
+
+def stiffness_matrix_level_rigid_frame(E, I1, I2, Lc, B, H):
+    """
+    Story stiffness matrix K_level for a rigid in-plane diaphragm with 4 identical corner columns.
+    Global DOFs: [Ux, Uy, Thetaz].
+
+    Inputs:
+        E, I1, I2 : material/section properties (I1 about x-axis, I2 about y-axis)
+        Lc        : story height
+        B, H      : diaphragm plan dimensions (B along x, H along y)
+
+    Returns:
+        - SymPy Matrix with simplified entries if symbols are present.
+        - numpy.ndarray (float) if all inputs are numeric.
+    """
+    # Column lateral stiffness in each global translation
+    k_col_x = column_stiffness(E, I2, Lc)  # governs Ux
+    k_col_y = column_stiffness(E, I1, Lc)  # governs Uy
+
+    # Diagonal story stiffness (symmetry -> no couplings)
+    K_xx = 4 * k_col_x
+    K_yy = 4 * k_col_y
+    K_tt = k_col_x * H**2 + k_col_y * B**2
+
+    K_sym = sym.Matrix([[K_xx, 0, 0],
+                       [0,   K_yy, 0],
+                       [0,     0,  K_tt]])
+
+    if _is_symbolic(E, I1, I2, Lc, B, H, k_col_x, k_col_y):
+        # Simplify entry-wise to keep expressions compact
+        K_simpl = K_sym.applyfunc(
+            lambda e: sym.simplify(sym.factor(sym.together(e))))
+        return K_simpl
+    else:
+        return np.array(K_sym.tolist(), dtype=float)
+
+
+def stiffness_matrix_level_rigid_X_frame(E, Ic_x, Ic_y, Lc, Ib, B, H):
+    """
+    Story stiffness matrix K_level for a rigid in-plane diaphragm with 4 identical corner columns.
+    Global DOFs: [Ux, Uy, Thetaz].
+
+    IMPORTANT: for this case, Y and Torsional directions are not computed
+    (will be done later)
+    """
+    # Column lateral stiffness in each global translation
+    k_col_x = column_stiffness(E, Ic_y, Lc)  # governs Ux
+    k_col_y = 0  # will be calculated later
+
+    # Diagonal story stiffness (symmetry -> no couplings)
+    K_xx = 4 * k_col_x
+    K_yy = 0  # will be calculated later
+    K_tt = 0   # will be calculated later
+
+    K_sym = sym.Matrix([[K_xx, 0, 0],
+                       [0,   K_yy, 0],
+                       [0,     0,  K_tt]])
+
+    if _is_symbolic(E, Ic_x, Ic_y, Lc, Ib, B, H):
+        # Simplify entry-wise to keep expressions compact
+        K_simpl = K_sym.applyfunc(
+            lambda e: sym.simplify(sym.factor(sym.together(e))))
+        return K_simpl
+    else:
+        return np.array(K_sym.tolist(), dtype=float)
 
 
 def stiffness_matrix_level(E, I1, I2, Lc, kx1, kx2, ky1, ky2, B, H):
@@ -630,8 +814,8 @@ def stiffness_matrix_level(E, I1, I2, Lc, kx1, kx2, ky1, ky2, B, H):
         Obtained in file 1_equations_2_lumped_model.py.
     """
     # Column lateral stiffness in each global translation
-    k_col_x = column_lateral_stiffness(E, I2, Lc, ky1, ky2)  # governs Ux
-    k_col_y = column_lateral_stiffness(E, I1, Lc, kx1, kx2)  # governs Uy
+    k_col_x = column_lateral_stiffness_rot_springs(E, I2, Lc, ky1, ky2)  # governs Ux
+    k_col_y = column_lateral_stiffness_rot_springs(E, I1, Lc, kx1, kx2)  # governs Uy
 
     # Diagonal story stiffness (symmetry -> no couplings)
     K_xx = 4 * k_col_x
@@ -1276,3 +1460,192 @@ def generalized_eig_singular(M, K, tol=1e-12):
     f = np.sqrt(np.abs(lam)) / (2*np.pi)  # frecuencias en Hz
 
     return f, phi
+
+
+
+def read_sensors_from_MOVA_file(filename):
+    """
+    Function Duties:
+        Extracts the sensors from the given file.
+    Input:
+        filename (str): Path to the text file.
+    Output:
+        sensors: dictionary containing the sensors
+            (related to the file geometry).
+    """
+    with open(filename, 'r') as file:
+        lines = file.readlines()
+
+    # Locate the start of the SENSORS section
+    start_marker = "SENSORS"
+    start_index = None
+    for i, line in enumerate(lines):
+        if start_marker in line:
+            start_index = i+1  # Skip the section title and the separator line
+            break
+
+    if start_index is None:
+        raise ValueError("SENSORS section not found in the file.")
+
+    # Read the data lines until the next empty line or section
+    sensors = dict()
+    for line in lines[start_index:]:
+        line = line.strip()
+        if not line and len(sensors) > 0:  # Stop reading at an empty line
+            break
+        line = line.split()
+        if len(line) == 1:  # skip the separator indicating the total number of sensors
+            continue
+        if line:
+            ch = len(sensors) + 1
+            node = line[0]
+            direction = [int(i) for i in line[1:]]
+            sensors[f'Channel_{ch}'] = {'node': node, 'dir': direction}
+            # if line[0] in list(sensors):  # this node already has a sensor
+            #     old_dofs = sensors[line[0]]
+            #     new_dofs = [float(i) for i in line[1:]]
+            #     sensors[line[0]] = list(np.array(old_dofs) + np.array(new_dofs))
+            # sensors[line[0]] = [float(i) for i in line[1:]]
+
+    return sensors
+
+
+def extract_info_from_name(test_name: str) -> dict:
+    """
+    Function Duties:
+        - Extract information from the test name
+    """
+    information = dict()
+    # Check for standalone numbers
+    match = re.search(r'\d+', test_name)
+    if match:
+        information['test_number'] = int(match.group())
+    else:
+        raise ValueError('No test number found in the test name')
+
+    # Assign data type
+    if 'acc' in test_name:
+        information['data_type'] = 'Acceleration'
+    else:
+        information['data_type'] = 'Strain'
+
+    # Check for 'Nsg'
+    match_sg = re.search(r'(\d+)sg', test_name)
+    if match_sg:
+        information['num_channels'] = int(match_sg.group(1))
+    else:
+        information['num_channels'] = None
+
+    # Check for 'suboptN'
+    match_subopt = re.search(r'subopt(\d+)', test_name)
+    if match_subopt:
+        information['num_subopt'] = int(match_subopt.group(1))
+    else:
+        information['num_subopt'] = None
+
+    return information
+
+
+def MOVA_read_geometry(filename):
+    """
+    Function to read and parse geometry file from MOVA
+    """
+    nodes, lines, planes, color_planes = dict(), dict(), dict(), dict()
+    line_id, plane_id, color_id = 1, 1, 1
+    mode = None  # Track which section we are in
+
+    with open(filename, 'r') as file:
+
+        for line in file:
+            line = line.strip()
+
+            # Identify sections
+            if "NODES" in line:
+                mode = "nodes"
+                continue
+            elif "LINES" in line:
+                mode = "lines"
+                continue
+            elif "SENSORS" in line:
+                mode = "sensors"
+                continue
+            elif "PLANES" in line:
+                mode = "planes"
+                continue
+            elif "COLOR" in line:
+                mode = "color"
+                continue
+            elif not line or line.startswith("//"):
+                continue  # Skip empty lines and comments
+
+            # Parse Nodes
+            if mode == "nodes":
+                parts = line.split()
+                node_id = int(parts[0])
+                x, y, z = map(float, parts[1:])
+                nodes[str(node_id)] = (x, y, z)
+
+            # Parse Lines
+            elif mode == "lines":
+                parts = list(map(int, line.split()))
+                if len(parts) == 2:
+                    lines[str(line_id)] = (str(parts[0]), str(parts[1]))
+                    line_id += 1
+
+            # Parse Planes
+            elif mode == "planes":
+                parts = list(map(int, line.split()))
+                if len(parts) >= 3:  # At least 3 points
+                    planes[str(plane_id)] = [str(p) for p in parts]
+                    plane_id += 1
+
+            # Parse Planes
+            elif mode == "color":
+                parts = list(map(int, line.split()))
+                if len(parts) >= 3:  # At least 3 points
+                    color_planes[str(color_id)] = [str(p) for p in parts]
+                    color_id += 1
+
+    return nodes, lines, planes, color_planes
+
+
+def compute_Y_torsional_stiffness_frame_rigid_X(K, levels):
+    """
+    Computes the global stiffness matrix of a steel frame with rigid X diaphragms
+    and cantilever behaviour in Y direction.
+
+    Takes as input the global stiffness matrix K with only Kxx terms computed.
+
+    Remark:
+        - It can be verified against steelframe_rigid_unions_X.sdb that the
+        computation is exact
+    """
+    n_levels = len(levels)
+
+    B_levels = [levels[i].B for i in range(n_levels)]
+    H_levels = [levels[i].H for i in range(n_levels)]
+    E_levels = [levels[i].E for i in range(n_levels)]
+    Ic_x_levels = [levels[i].Ic_x for i in range(n_levels)]
+    Lc_levels = [levels[i].Lc for i in range(n_levels)]
+
+    if any ([len(set(list_i)) > 1 for list_i in [B_levels, H_levels, E_levels, Ic_x_levels, Lc_levels]]):
+        print('TO BE DONE: different E, Ic_x, Lc per level')
+        raise NotImplementedError
+    else:
+        B, H, E, Ic_x, Lc = B_levels[0], H_levels[0], E_levels[0], Ic_x_levels[0], Lc_levels[0]
+
+    Kyy_column, _ = assemble_global_beam_np(E, Ic_x, Lc, n_levels)  # one column
+    Kyy_column, _ = reduce_cantilever_np(Kyy_column)
+    rot_dofs = [i for i in range(Kyy_column.shape[0]) if i % 2 == 1]
+    Kyy_column, _ = static_condensation(Kyy_column, slave_dofs=rot_dofs)
+
+    Kxx = K[0:n_levels, 0:n_levels]
+    Kyy = 4 * Kyy_column
+
+    Ktt = (H**2 / 4.0) * Kxx + (B**2 / 4.0) * Kyy
+
+    Kxy, Kxt, Kty = np.zeros((n_levels, n_levels)), np.zeros((n_levels, n_levels)), np.zeros((n_levels, n_levels))
+    K_upd = np.block([[Kxx, Kxy, Kxt],
+                      [Kxy.T, Kyy, Kty],
+                      [Kxt.T, Kty.T, Ktt]])
+    return K_upd
