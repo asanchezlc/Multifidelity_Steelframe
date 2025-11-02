@@ -1649,3 +1649,130 @@ def compute_Y_torsional_stiffness_frame_rigid_X(K, levels):
                       [Kxy.T, Kyy, Kty],
                       [Kxt.T, Kty.T, Ktt]])
     return K_upd
+
+
+def round_6_sign_digits(number):
+    """
+    Function duties:
+        Rounds a float to 6 significant digits
+    """
+    formatted_number = "{:.6g}".format(number)
+    rounded_number = float(formatted_number)
+
+    return rounded_number
+
+
+def prepare_log_folder(sap2000_model_path: str, sdb_filename: str) -> str:
+    """
+    Prepares the log folder by copying the original .sdb model into it.
+
+    This function:
+        - Creates the 'log/' folder inside sap2000_model_path if it doesn't exist.
+        - Deletes any existing .sdb file in the 'log/' folder.
+        - Copies the original .sdb model from sap2000_model_path into 'log/'.
+
+    Parameters
+    ----------
+    sap2000_model_path : str
+        Path where the original .sdb file is located.
+
+    sdb_filename : str
+        Name of the SAP2000 model file (e.g., 'model.sdb').
+
+    Returns
+    -------
+    log_filepath : str
+        Full path to the copied .sdb file inside the 'log/' folder.
+
+    Raises
+    ------
+    RuntimeError
+        If the copy operation fails.
+    """
+    original_filepath = os.path.join(sap2000_model_path, sdb_filename)
+    log_folder = os.path.join(sap2000_model_path, 'log')
+    log_filepath = os.path.join(log_folder, sdb_filename)
+
+    # Ensure log folder exists
+    os.makedirs(log_folder, exist_ok=True)
+
+    # Remove existing .sdb in log folder if it exists
+    try:
+        if os.path.isfile(log_filepath):
+            os.remove(log_filepath)
+    except OSError as e:
+        print(f"[WARN] Could not delete previous .sdb in log/: {e}")
+
+    # Copy the original .sdb to log folder
+    try:
+        shutil.copy(original_filepath, log_filepath)
+    except Exception as e:
+        raise RuntimeError(f"[ERROR] Failed to copy .sdb file to log/: {e}")
+
+    return log_filepath
+
+
+def increment_filename(filename):
+    """
+    Function Duties:
+        Increment a filename if it already exists in the folder.
+    Example
+    """
+    base, ext = os.path.splitext(filename)
+    match = re.search(r'(\d+)$', base)
+    if match:  # If a number is found, increment it
+        number = int(match.group(1))
+        new_base = base[:match.start()] + str(number + 1)
+    else:  # If no number is found, add '1' to the base name
+        new_base = base + '1'
+
+    # Generate the new filename
+    new_filename = new_base + ext
+
+    return new_filename
+
+
+def parse_xyz(filename: str):
+    """
+    Parse filenames like 'x=0-5_y=0-25_z=1-25_FZ.txt' and return floats.
+    Hyphen '-' inside the number is treated as a decimal point.
+    """
+    PATTERN = re.compile(
+        r"x=(?P<x>[+-]?\d+(?:-\d+)?)_y=(?P<y>[+-]?\d+(?:-\d+)?)_z=(?P<z>[+-]?\d+(?:-\d+)?)_"
+        )
+    m = PATTERN.search(filename)
+    if not m:
+        raise ValueError(f"Cannot find x/y/z pattern in: {filename}")
+
+    def to_float(s: str) -> float:
+        return float(s.replace("-", "."))
+
+    x = to_float(m.group("x"))
+    y = to_float(m.group("y"))
+    z = to_float(m.group("z"))
+    return x, y, z
+
+
+def find_point_by_coord(all_points_coord: dict,
+                        x: float,
+                        y: float,
+                        z: float,
+                        tol: float = 1e-6):
+    """
+    Returns the point name whose coordinates match (x, y, z) within `tol`.
+    If several points match, returns a list of all of them.
+    If none match, returns None.
+    """
+    matches = []
+
+    for pt_name, coord in all_points_coord.items():
+        if (abs(coord["x"] - x) <= tol and
+            abs(coord["y"] - y) <= tol and
+            abs(coord["z"] - z) <= tol):
+            matches.append(pt_name)
+
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    return matches

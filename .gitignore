@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 /src/output/old/
+/src/sap2000
 
 # C extensions
 *.so
