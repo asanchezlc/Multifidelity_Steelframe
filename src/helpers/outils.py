@@ -1,7 +1,10 @@
 
+import copy
 import re
 import os
 import shutil
+import psutil
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -11,6 +14,33 @@ import helpers.sap2000 as sap2000
 
 from scipy.linalg import eigh
 from typing import Any, List, Sequence
+
+
+
+def kill_process_advanced(process_name):
+    """Kills the specified process and its subprocesses."""
+    found_process = False
+    for proc in psutil.process_iter():
+        try:
+            if process_name.lower() in proc.name().lower():
+                found_process = True
+                print(f"Killing process '{proc.name()}' with PID {proc.pid}")
+                proc.kill()
+                proc.wait()  # Wait for the process to fully terminate
+
+                # Check for any child processes and kill them
+                for child in proc.children(recursive=True):
+                    print(
+                        f"Killing subprocess '{child.name()}' with PID {child.pid}")
+                    child.kill()
+                    child.wait()
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+            print(f"Error: {e}")
+
+    if not found_process:
+        print(f"The process '{process_name}' is not running.")
+
 
 def has_match(row, df):
     """
@@ -1732,6 +1762,131 @@ def increment_filename(filename):
     return new_filename
 
 
+def get_accelerometer_channels_from_forces(forces_setup):
+    """
+    Function Duties:
+        Processes nodal force data (e.g. from SAP2000) and builds a dictionary
+        of accelerometer channels with their location and measurement direction.
+
+    Input:
+        forces_setup : dict
+            Dictionary containing point force data:
+            - 'PointObj' : list of node names
+            - 'F1', 'F2', 'F3' : lists of force values in local axes 1, 2, 3
+
+    Output:
+        acc_channels : dict
+            Dictionary with structure:
+            {
+                'Channel_1': {'point': 'NodeA', 'dir': [±1, 0, 0]},
+                'Channel_2': {'point': 'NodeB', 'dir': [0, ±1, 0]},
+                ...
+            }
+            - Direction vector is aligned with the nonzero force component.
+            - Channel number is inferred from the absolute value of the force.
+    Notes:
+        - Each nonzero force component creates one channel.
+        - The output is sorted by channel number for consistency.
+    Remark:
+        For fully coherence, this function might be enhanced to totally match
+        the structure of get_SGs_positions_dictionary; for that, a new
+        get_point_forces function to obtain forces_setup would be required
+    """
+    point_ids = forces_setup['PointObj']
+    f1 = forces_setup['F1']
+    f2 = forces_setup['F2']
+    f3 = forces_setup['F3']
+    n_items_f1 = len([i for i in range(len(f1)) if f1[i] != 0])
+    n_items_f2 = len([i for i in range(len(f2)) if f2[i] != 0])
+    n_items_f3 = len([i for i in range(len(f3)) if f3[i] != 0])
+    n_items = n_items_f1 + n_items_f2 + n_items_f3
+
+    acc_channels = dict()
+    for i in range(len(point_ids)):
+
+        if f1[i] != 0:
+            direction = [0, 0, 0]
+            direction[0] = int(np.sign(f1[i]))
+            channel_id = int(abs(f1[i]))
+            acc_channels[f'Channel_{channel_id}'] = {
+                'point': point_ids[i],
+                'dir': direction
+            }
+        if f2[i] != 0:
+            direction = [0, 0, 0]
+            direction[1] = int(np.sign(f2[i]))
+            channel_id = int(abs(f2[i]))
+            acc_channels[f'Channel_{channel_id}'] = {
+                'point': point_ids[i],
+                'dir': direction
+            }
+        if f3[i] != 0:
+            direction = [0, 0, 0]
+            direction[2] = int(np.sign(f3[i]))
+            channel_id = int(abs(f3[i]))
+            acc_channels[f'Channel_{channel_id}'] = {
+                'point': point_ids[i],
+                'dir': direction
+            }
+
+    sorted_items = sort_string_separated_by(list(acc_channels), separator='_')
+    acc_channels = {key: acc_channels[key] for key in sorted_items}
+
+    # Assign direction (i.e. U1, U2...)
+    acc_channels = add_direction_to_acc_channels(acc_channels)
+
+    return acc_channels
+
+
+def sort_string_separated_by(str_list, separator='_'):
+    """
+    Function Duties:
+        Sorts a string with numbers separated by a separator
+        example: ['Element_1', 'Element_10', 'Element_2'] ->
+            -> ['Element_1', 'Element_2', 'Element_10']
+    Input:
+        str_list: list of strings
+        separator: character that separates numbers in the strings
+    Output:
+        str_sorted: sorted list of strings
+    """
+    str_sorted = sorted(str_list, key=lambda x: int(x.split(separator)[-1]))
+
+    return str_sorted
+
+
+
+def add_direction_to_acc_channels(channels):
+    """
+    Function Duties:
+    - Add the 'direction' of the accelerometers to the channels dictionary.
+    Input:
+        channels: a dictionary containing 'dir' key, which is like
+        [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], or [0, 0, -1].
+    Output:
+        channels_with_direction: a copy of the input dictionary with an additional
+        'direction' key for each channel, containing the direction as a str.
+        e.g. if [-1, 0, 0] -> '-U1' -> , if [0, 1, 0] -> 'U2', etc.
+    """
+    channels_with_direction = copy.deepcopy(channels)
+    for ch in list(channels_with_direction):
+        dir_vec = channels_with_direction[ch]['dir']
+        if dir_vec[0] == 1:
+            channels_with_direction[ch]['direction'] = 'U1'
+        elif dir_vec[1] == 1:
+            channels_with_direction[ch]['direction'] = 'U2'
+        elif dir_vec[2] == 1:
+            channels_with_direction[ch]['direction'] = 'U3'
+        elif dir_vec[0] == -1:
+            channels_with_direction[ch]['direction'] = '-U1'
+        elif dir_vec[1] == -1:
+            channels_with_direction[ch]['direction'] = '-U2'
+        elif dir_vec[2] == -1:
+            channels_with_direction[ch]['direction'] = '-U3'
+
+    return channels_with_direction
+
+
 def parse_xyz(filename: str):
     """
     Parse filenames like 'x=0-5_y=0-25_z=1-25_FZ.txt' and return floats.
@@ -1776,3 +1931,142 @@ def find_point_by_coord(all_points_coord: dict,
     if len(matches) == 1:
         return matches[0]
     return matches
+
+
+
+def _parse_direction(direction: str):
+    """
+    Returns (component, sign). E.g. '-U1' -> ('U1', -1), 'R3' -> ('R3', 1).
+    """
+    direction = direction.strip()
+    sign = -1 if direction.startswith("-") else 1
+    comp = direction[1:] if direction.startswith(("-", "+")) else direction
+    valid = {"U1", "U2", "U3", "R1", "R2", "R3"}
+    if comp not in valid:
+        raise ValueError(f"Invalid direction '{direction}'. Expected one of {sorted(valid)} with optional '+'/'-'.")
+    return comp, sign
+
+
+def _extract_time_steps_from_results(res: dict, load_case: str):
+    """
+    Build an ordered list of time steps for the given load case, considering only 'Time' steps.
+    Keeps first-seen order to avoid floating rounding re-sorting artifacts.
+    """
+    steps = []
+    seen = set()
+    for lc, stype, t in zip(res["LoadCase"], res["StepType"], res["StepNum"]):
+        if lc == load_case and stype == "Time" and t not in seen:
+            seen.add(t)
+            steps.append(t)
+    if not steps:
+        raise RuntimeError(f"No 'Time' steps found for load case '{load_case}'. "
+                           "Ensure modal-history output is set to step-by-step.")
+    return steps
+
+
+def _series_for_point_component(res: dict, load_case: str, point: str, comp: str, time_steps: list[float], round_timesteps: bool = True):
+    """
+    Collects the series for a given point/component following the provided `time_steps`.
+    """
+    # Map component -> array
+    comp_map = {
+        "U1": res["U1"], "U2": res["U2"], "U3": res["U3"],
+        "R1": res["R1"], "R2": res["R2"], "R3": res["R3"],
+    }
+
+    # Index the (StepNum -> value) for the specific point & load case & Time steps
+    step_to_val = {}
+    for obj, lc, stype, t, val in zip(res["Obj"], res["LoadCase"], res["StepType"], res["StepNum"], comp_map[comp]):
+        if obj == point and lc == load_case and stype == "Time":
+            if round_timesteps:
+                t = round_6_sign_digits(t)
+            step_to_val[t] = val
+
+    if len(step_to_val) < len(time_steps):
+        # We’ll insert None for missing samples.
+        message = f"Point '{point}' component '{comp}' is missing some time steps for load case '{load_case}'. HINT: A problem with rounding time steps might be occurring."
+        warnings.warn(message, UserWarning)
+
+    return [step_to_val.get(t, None) for t in time_steps]
+
+
+def get_channels_time_history_accelerations(
+    SapModel,
+    load_case: str,
+    channels: dict,
+    round_timesteps: bool = True,
+    rel_acceleration: bool = True,
+):
+    """
+    Returns per-channel acceleration time series for a given load case.
+
+    Inputs
+    ------
+    SapModel : cSapModel
+    load_case : str
+        Name of the time-history load case (e.g., 'test_TH').
+    channels : dict
+        {'Channel_1': {'point': '27', 'direction': '-U1'}, ...}
+    round_timesteps : bool, default=True
+        Whether to round time steps to 6 significant digits to avoid floating point issues.
+    rel_acceleration : bool, default=True
+        If True, returns relative acceleration is within the reference frame local to the
+            structure
+        If False, absolute acceleration is given as the sum of relative acceleration and ground
+            acceleration
+        See https://web.wiki.csiamerica.com/wiki/spaces/kb/pages/2000234/Acceleration+FAQ
+
+    Outputs
+    -------
+    results_dict : dict
+        Keyed as '{point}_{direction}' (e.g., '27_-U1') with list of values.
+        IMPORTANT: values are given in local axes of the point object.
+    time_steps : list[float]
+        The time vector corresponding to the values.
+    """
+    # Run the model if it is not locked
+    if not sap2000.is_model_locked(SapModel):
+        sap2000.run_analysis(SapModel)
+
+    # Ensure output setup is correct for modal history
+    sap2000.set_results_to_step_by_step(SapModel, load_case)
+
+    # Query results point-by-point (robust and simple)
+    # Collect results for the set of unique points referenced by channels
+    unique_points = sorted({ch['point'] for ch in channels.values()})
+    per_point_results = {}
+    for pt in unique_points:
+        res = sap2000.get_joint_accelerations(SapModel, name=str(pt), item_type=0,  # ObjectElm
+                                              round_timesteps=round_timesteps,
+                                              rel_acceleration=rel_acceleration)
+        per_point_results[pt] = res
+
+    # Build a canonical time vector using the first available point that has data
+    time_steps = None
+    for pt in unique_points:
+        res = per_point_results[pt]
+        try:
+            time_steps = _extract_time_steps_from_results(res, load_case)
+            break
+        except:
+            message = f"No time steps found for load case '{load_case}' at point '{pt}'. Trying next point."
+            warnings.warn(message, UserWarning)
+            continue
+    if time_steps is None:
+        raise RuntimeError(f"No time steps found for load case '{load_case}' in any requested point.")
+
+    # Assemble per-channel series
+    results_dict = {}
+    for _, cfg in channels.items():
+        point = str(cfg["point"])
+        comp, sign = _parse_direction(cfg["direction"])
+        res = per_point_results.get(point)
+        if res is None:
+            raise RuntimeError(f"Missing results for point '{point}'.")
+        series = _series_for_point_component(res, load_case, point, comp, time_steps, round_timesteps=round_timesteps)
+        # Apply sign
+        series = [None if v is None else sign * v for v in series]
+        key = f"{point}_{cfg['direction']}"
+        results_dict[key] = series
+
+    return results_dict, time_steps

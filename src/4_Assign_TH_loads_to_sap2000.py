@@ -17,6 +17,15 @@ Remark:
 
 sapfile_name = 'DA_uncalibrated_v7_updated.sdb'
 
+# instead of all points; we do this after seen sap2000 gets stuck with many points
+points_to_assign_dict = {
+    "1": {"x": 0.0, "y": 0.0,   "z": 0.25},
+    "2": {"x": 0.0, "y": 0.25,  "z": 0.5},
+    "3": {"x": 0.0, "y": 0.0,   "z": 0.75},
+    "4": {"x": 0.5, "y": 0.0,   "z": 1.0},
+    "5": {"x": 0.5, "y": 0.25,  "z": 1.25},
+}
+
 # TIME HISTORY CONFIGURATION
 xi = 0.02  # same as in lumped model
 fs = 207  # [Hz] Sampling frequency
@@ -24,7 +33,7 @@ factor_dt = 10  # 1/factor_dt is the factor to increase the time step
 T = 15*60  # [sec] Period of the time series (15 minutes)
 load_case_name = 'TH_Loads'  # Name of the time history load case to be created
 
-path_functions = os.path.join('src', 'sap2000', 'functions')
+path_functions = r"C:\Users\User\Documents\DOCTORADO_CODES\Multifidelity_Steelframe\src\sap2000\functions"
 files = os.listdir(path_functions)
 sap2000_model_path = os.path.join('src', 'sap2000')
 sapfile_name_out = sapfile_name.split('.sdb')[0] + '_with_TH.sdb'
@@ -50,13 +59,6 @@ for file in files:
     # Load pattern and function name
     load_pattern = file.split('.')[0]
     function_name = load_pattern
-    load_i = {
-        'type': 'Load',
-        'name': load_pattern,
-        'func': function_name,
-        'sf': 1.0,
-    }
-    loads.append(load_i)
 
     # Load values
     forces = [0]*6  # FX, FY, FZ, MX, MY, MZ
@@ -65,7 +67,10 @@ for file in files:
 
     # Point object
     x, y, z = outils.parse_xyz(file)
-    point_name = outils.find_point_by_coord(all_points_coord, x, y, z)
+    # point_name = outils.find_point_by_coord(all_points_coord, x, y, z)
+    point_name = outils.find_point_by_coord(points_to_assign_dict, x, y, z)
+    if point_name is None or force_label not in ['FX', 'FY']:
+        continue
 
     # Def load pattern and assign unity force
     sap2000.add_load_pattern(SapModel, name=load_pattern)
@@ -81,6 +86,13 @@ for file in files:
                                                 points_per_line=1,
                                                 value_type=2,
                                                 free_format=True)
+    load_i = {
+        'type': 'Load',
+        'name': load_pattern,
+        'func': function_name,
+        'sf': 1.0,
+    }
+    loads.append(load_i)
 
 # Define time history load case
 dt = 1/(factor_dt * fs)  # [sec] time resolution

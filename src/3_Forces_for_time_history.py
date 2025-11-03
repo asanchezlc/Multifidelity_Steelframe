@@ -58,5 +58,5 @@ for node, coords in nodes.items():
         f = forces[:, count]
         f_matrix = np.array([t, f]).T
         filename_f = f"x={str(round(x,3)).replace('.', '-')}_y={str(round(y,3)).replace('.', '-')}_z={str(round(z,3)).replace('.', '-')}_F{dir}.txt"
-        np.savetxt(os.path.join(output_path, filename_f), f_matrix, delimiter="\t")
+        np.savetxt(os.path.join(output_path, filename_f), f_matrix, fmt="%.8f", delimiter=" ")
         count += 1

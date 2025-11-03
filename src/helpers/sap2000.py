@@ -55,7 +55,6 @@ def application_exit(SapObject, file_save=False) -> None:
     file_save : bool, optional
         If True, saves the current model before closing. Default is False.
     """
-
     ret = SapObject.ApplicationExit(file_save)
     raise_warning('Unable to close SAP2000 application', ret)
     SapObject = None  # Release SAP2000 COM references (good practice)
@@ -1446,7 +1445,7 @@ def get_modalforces_timehistory(Name_elements_group, SapModel,
         selected_elements: a list of elements to be considered (if None, all elements are considered)
             it is used to filter the results (much smaller dictionary)
     Output:
-        results: dictionary containing information for the time history as follow:
+        results: dictionary containing information for the time history as follows:
             Mode_i: element_1
             element_1 to element_N:
                 x: x coordinates
@@ -4105,3 +4104,149 @@ def create_linear_modal_history_case(
             ang,
         )
         raise_warning(f"Set {n} load(s) for '{name}'", ret)
+
+
+def get_joint_accelerations(
+    SapModel,
+    name: str,
+    item_type : int = 0,
+    round_timesteps: bool = True,
+    rel_acceleration: bool = True
+):
+    """
+    Retrieves relative joint accelerations (local U1,U2,U3 and R1,R2,R3) via
+    Results.JointAcc for a point object/element/group/selection.
+
+    Parameters
+    ----------
+    SapModel : object
+        Active SAP2000 model (cSapModel).
+    name : str
+        Point object/element name or group name (ignored if SelectionElm).
+    item_type : int:
+            0 → point element of the specified point object
+            1 → point element specified by `name`
+            2 → all point elements in group `name`
+            3 → all selected point elements (ignore `name`)
+        Default is 0 ("ObjectElm").
+    round_timesteps : bool, optional
+        If True, rounds time step numbers to 6 significant digits
+    rel_acceleration : bool, optional
+        If True, retrieves relative accelerations (Results.JointAcc).
+        If False, retrieves absolute  - i.e. relative + ground (Results.JointAccAbs).
+
+    Returns
+    -------
+    IMPORTANT: values are given in local axes of the point object.
+    dict
+        {
+          "NumberResults": int,
+          "Obj":  list[str],   # may contain blanks when no point object exists
+          "Elm":  list[str],
+          "LoadCase": list[str],
+          "StepType": list[str],
+          "StepNum":  list[float],
+          "U1": list[float], "U2": list[float], "U3": list[float],
+          "R1": list[float], "R2": list[float], "R3": list[float],
+        }
+
+    Raises
+    ------
+    Warning
+        If SAP2000 returns a nonzero code.
+    """
+    NumberResults = 0
+    Obj, Elm, LoadCase, StepType, StepNum = [], [], [], [], []
+    U1, U2, U3, R1, R2, R3 = [], [], [], [], [], []
+
+    if rel_acceleration:
+        output = SapModel.Results.JointAcc(
+            name,
+            item_type,
+            NumberResults,
+            Obj, Elm, LoadCase, StepType, StepNum,
+            U1, U2, U3, R1, R2, R3
+        )
+    else:
+        output = SapModel.Results.JointAccAbs(
+            name,
+            item_type,
+            NumberResults,
+            Obj, Elm, LoadCase, StepType, StepNum,
+            U1, U2, U3, R1, R2, R3
+        )
+
+    (NumberResults,
+     Obj, Elm, LoadCase, StepType, StepNum,
+     U1, U2, U3, R1, R2, R3,
+     ret) = output
+
+    raise_warning("Get joint accelerations", ret)
+
+    if round_timesteps:
+        StepNum = [outils.round_6_sign_digits(t) for t in StepNum]
+
+    return {
+        "NumberResults": int(NumberResults),
+        "Obj": list(Obj),
+        "Elm": list(Elm),
+        "LoadCase": list(LoadCase),
+        "StepType": list(StepType),
+        "StepNum": list(StepNum),
+        "U1": list(U1), "U2": list(U2), "U3": list(U3),
+        "R1": list(R1), "R2": list(R2), "R3": list(R3),
+    }
+
+
+def is_model_locked(SapModel) -> bool:
+    """
+    Checks if the SAP2000 model is locked.
+
+    Parameters
+    ----------
+    SapModel : object
+        The SAP2000 model API object.
+
+    Returns
+    -------
+    bool
+        True if the model is locked, False otherwise.
+    """
+    locked = SapModel.GetModelIsLocked()
+
+    return locked
+
+def set_results_to_step_by_step(SapModel, loadcase_name: str) -> None:
+    """
+    Sets the SAP2000 results mode to "Step by Step" for a specified load case.
+
+    Parameters
+    ----------
+    SapModel : object
+        Active SAP2000 model (cSapModel).
+    load_case : str
+        Name of the load case for which to set the results mode.
+
+    Raises
+    ------
+    Warning
+        If SAP2000 returns a nonzero code.
+    """
+    ret = SapModel.Results.Setup.DeselectAllCasesAndCombosForOutput
+    raise_warning('Deselect all cases', ret)
+    ret = SapModel.Results.Setup.SetCaseSelectedForOutput(loadcase_name)
+    raise_warning('Select modal case', ret)
+    ret = SapModel.Results.Setup.SetOptionModalHist(2)
+    raise_warning('Set modal history option', ret)
+
+    # Change display table options (only way I found to show step-by-step results)
+    # Envelopes, Step_by_Step = 1, 2
+    # BaseReactionGX, BaseReactionGY, BaseReactionGZ = 0, 0, 0
+    # IsAllModes, StartMode, EndMode = False, 1, 1
+    # IsAllBucklingModes, StartBuckingMode, EndBucklingMode = False, 1, 1
+    # ModalHistory, DirectHistory, NonLinearStatic = Step_by_Step, Step_by_Step, Step_by_Step
+    # MultistepStaticStatic, SteadyState = Step_by_Step, Envelopes
+    # SteadyStateOption, PowerSpectralDensity, Combo, BridgeDesing = 1, 1, 1, 1
+    # ret = SapModel.DatabaseTables.SetTableOutputOptionsForDisplay(BaseReactionGX, BaseReactionGY, BaseReactionGZ, IsAllModes, StartMode, EndMode, IsAllBucklingModes, StartBuckingMode,
+    #                                                                 EndBucklingMode, ModalHistory, DirectHistory, NonLinearStatic, MultistepStaticStatic, SteadyState, SteadyStateOption, PowerSpectralDensity, Combo, BridgeDesing)
+    # sap2000.raise_warning('Display tables - options', ret)

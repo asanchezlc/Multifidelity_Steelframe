@@ -1,0 +1,2 @@
+
+En sap2000, para generar las fuerzas, las he hecho random, por lo que es difícil que se excite torsionalmente
