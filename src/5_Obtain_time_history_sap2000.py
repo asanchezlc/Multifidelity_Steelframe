@@ -17,10 +17,10 @@ Retrieve time history accelerations from SAP2000 model for a given load case
 and save them in a text file.
 """
 # 0. SAP2000 variables
-sapfile_name = 'delete.sdb'
-# sapfile_name = 'DA_uncalibrated_v7_updated_with_TH.sdb'
-loadcase_name = 'test_TH'  # name of the load case in SAP2000
-# loadcase_name = 'TimeHistory'  # name of the load case in SAP2000
+# sapfile_name = 'delete.sdb'
+sapfile_name = 'DA_uncalibrated_v7_updated_with_TH.sdb'
+# loadcase_name = 'test_TH'  # name of the load case in SAP2000
+loadcase_name = 'TimeHistory'  # name of the load case in SAP2000
 load_pattern_channels = "DOFs"  # load pattern used to define the accelerometers in SAP2000
 round_timesteps, round_coordinates = True, True
 
