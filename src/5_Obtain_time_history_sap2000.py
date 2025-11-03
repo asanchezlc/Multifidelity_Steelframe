@@ -22,9 +22,6 @@ DUR. CARGA
 RUIDO
 """
 # 0. SAP2000 variables
-SNR = 10  # Signal-to-Noise ratio (noise to add to the output)
-af = 1  # Amplitude of the force (Same as in forces_for_time_history)
-rng = np.random.RandomState(12345)  # Set the seed
 # sapfile_name = 'delete.sdb'
 sapfile_name = 'DA_uncalibrated_v7_updated.sdb'
 # loadcase_name = 'test_TH'  # name of the load case in SAP2000
@@ -64,15 +61,8 @@ acc_channels = outils.get_accelerometer_channels_from_forces(
 time_history, t = outils.get_channels_time_history_accelerations(SapModel, load_case=loadcase_name, channels=acc_channels,
                                                                  round_timesteps=round_timesteps, rel_acceleration=True)
 
-# Add noise to signals
-ar = af / (10 ** (SNR / 20))  # Noise amplitude
-accelerations = np.zeros((len(t), len(acc_channels)))
-for i, dof in enumerate(time_history):
-    acc = np.array(time_history[dof])
-    acc_noise = acc + ar * rng.standard_normal(size=acc.shape)  # adding noise
-    accelerations[:, i] = np.array(time_history[dof])
-
-# Save results
+# 3) Save results
+# General data
 fs = 1/np.mean(np.diff(t))  # Hz
 output_details = {
     'sapfile_name': sapfile_name,
@@ -83,6 +73,11 @@ output_details = {
 
 with open(os.path.join(output_path, output_filename.replace('.txt', '_details.json')), 'w') as f:
     json.dump(output_details, f, indent=4)
+
+# Accelerations
+accelerations = np.zeros((len(t), len(acc_channels)))
+for i, dof in enumerate(time_history):
+    accelerations[:, i] = np.array(time_history[dof])
 
 np.savetxt(os.path.join(output_path, output_filename), accelerations, delimiter="\t")
 
