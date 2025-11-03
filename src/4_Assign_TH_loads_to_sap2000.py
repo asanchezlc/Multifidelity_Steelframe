@@ -16,6 +16,7 @@ Remark:
 """
 
 sapfile_name = 'DA_uncalibrated_v7_updated.sdb'
+path_functions = r"C:\Users\WindowsVM\Documents\DOCTORADO_CODES\Multifidelity_Steelframe\src\sap2000\functions"
 
 # instead of all points; we do this after seen sap2000 gets stuck with many points
 points_to_assign_dict = {
@@ -33,7 +34,6 @@ factor_dt = 10  # 1/factor_dt is the factor to increase the time step
 T = 15*60  # [sec] Period of the time series (15 minutes)
 load_case_name = 'TH_Loads'  # Name of the time history load case to be created
 
-path_functions = r"C:\Users\User\Documents\DOCTORADO_CODES\Multifidelity_Steelframe\src\sap2000\functions"
 files = os.listdir(path_functions)
 sap2000_model_path = os.path.join('src', 'sap2000')
 sapfile_name_out = sapfile_name.split('.sdb')[0] + '_with_TH.sdb'

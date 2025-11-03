@@ -21,20 +21,26 @@ FREQ. ADQUISICIÓN
 DUR. CARGA
 RUIDO
 """
+
+path = r'C:\Users\User\Documents\DOCTORADO\Multifidelity_Steelframe\PythonData\output'
+filename = 'DA_uncalibrated_v7_updated_with_TH_TimeHistory_accelerations_1.txt'
+
+a = np.loadtxt(os.path.join(path, filename))
+t = np.arange(0, a.shape[0]) / 1118.89
+
+
+
 # 0. SAP2000 variables
-SNR = 10  # Signal-to-Noise ratio (noise to add to the output)
-af = 1  # Amplitude of the force (Same as in forces_for_time_history)
-rng = np.random.RandomState(12345)  # Set the seed
 # sapfile_name = 'delete.sdb'
 sapfile_name = 'DA_uncalibrated_v7_updated.sdb'
 # loadcase_name = 'test_TH'  # name of the load case in SAP2000
-loadcase_name = 'TimeHistory'  # name of the load case in SAP2000
+loadcase_name = 'delete-TH'  # name of the load case in SAP2000
 load_pattern_channels = "DOFs"  # load pattern used to define the accelerometers in SAP2000
 round_timesteps, round_coordinates = True, True
 
 # Paths
 output_path = os.path.join('src', 'output')
-sap2000_model_path = os.path.join('src', 'sap2000')
+sap2000_model_path = r"C:\Users\User\Documents\DOCTORADO\Multifidelity_Steelframe\PythonData\sap2000"
 sapfile_path = os.path.join(sap2000_model_path, sapfile_name)
 output_filename = sapfile_name.replace('.sdb', f'_{loadcase_name}_accelerations_1.txt')
 
@@ -50,7 +56,6 @@ if output_filename in os.listdir(output_path):
 # 1) Open SAP2000 model and get the channels corresponding to the accelerometers
 mySapObject = sap2000.app_start(use_GUI=True)
 SapModel = sap2000.open_file(mySapObject, sapfile_path)
-sap2000.unlock_model(SapModel)
 
 # Retrieve the channels
 forces_setup = sap2000.get_point_forces(
@@ -64,16 +69,19 @@ acc_channels = outils.get_accelerometer_channels_from_forces(
 time_history, t = outils.get_channels_time_history_accelerations(SapModel, load_case=loadcase_name, channels=acc_channels,
                                                                  round_timesteps=round_timesteps, rel_acceleration=True)
 
-# Add noise to signals
-ar = af / (10 ** (SNR / 20))  # Noise amplitude
+# DELETE
+fig, ax = plt.subplots()
+for dof in time_history:
+    ax.plot(t, time_history[dof], label=dof)
+ax.legend()
+
+fs = 1/np.mean(np.diff(t))  # Hz
 accelerations = np.zeros((len(t), len(acc_channels)))
 for i, dof in enumerate(time_history):
-    acc = np.array(time_history[dof])
-    acc_noise = acc + ar * rng.standard_normal(size=acc.shape)  # adding noise
     accelerations[:, i] = np.array(time_history[dof])
 
-# Save results
-fs = 1/np.mean(np.diff(t))  # Hz
+np.savetxt(os.path.join(output_path, output_filename), accelerations, delimiter="\t")
+
 output_details = {
     'sapfile_name': sapfile_name,
     'loadcase_name': loadcase_name,
@@ -83,7 +91,5 @@ output_details = {
 
 with open(os.path.join(output_path, output_filename.replace('.txt', '_details.json')), 'w') as f:
     json.dump(output_details, f, indent=4)
-
-np.savetxt(os.path.join(output_path, output_filename), accelerations, delimiter="\t")
 
 sap2000.application_exit(mySapObject)

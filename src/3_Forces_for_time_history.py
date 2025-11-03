@@ -14,6 +14,7 @@ Remark:
     - After running this file, the generated files can be used for assigning time history loads
 """
 # Filenames
+run_in_server = True  # If True, comma is used for decimal separator in the txt files
 filename_channels = "geometry_OMA_Setup_1.txt"  # used in MOVA too
 filename_json = 'steelframe_rigid_X_cantilever_Y.json'
 config_path = os.path.join('src', 'data')
@@ -59,4 +60,6 @@ for node, coords in nodes.items():
         f_matrix = np.array([t, f]).T
         filename_f = f"x={str(round(x,3)).replace('.', '-')}_y={str(round(y,3)).replace('.', '-')}_z={str(round(z,3)).replace('.', '-')}_F{dir}.txt"
         np.savetxt(os.path.join(output_path, filename_f), f_matrix, fmt="%.8f", delimiter=" ")
+        if run_in_server:
+            outils.replace_dots_with_commas_in_file(output_path, filename_f)
         count += 1

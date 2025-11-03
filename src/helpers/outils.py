@@ -2070,3 +2070,18 @@ def get_channels_time_history_accelerations(
         results_dict[key] = series
 
     return results_dict, time_steps
+
+
+def replace_dots_with_commas_in_file(filepath, filename) -> None:
+    """
+    Replace dots with commas in a text file.
+    """
+    full_path = os.path.join(filepath, filename)
+    # Replace dots with commas
+    with open(full_path, "r", encoding="utf-8") as file:
+        text = file.read()
+
+    text = text.replace(".", ",")
+
+    with open(full_path, "w", encoding="utf-8") as file:
+        file.write(text)
