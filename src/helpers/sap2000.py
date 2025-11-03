@@ -12,6 +12,8 @@ import warnings
 
 import helpers.outils as outils
 
+from typing import Union
+
 
 def raise_warning(process_name, ret) -> None:
     """
@@ -4003,10 +4005,10 @@ def create_linear_modal_history_case(
     name: str,
     *,
     modal_case: str = "MODAL",
-    damping: float | None = None,
+    damping: Union[float, None] = None,
     n_steps: int = 200,
     dt: float = 0.02,
-    loads: list[dict] | None = None,
+    loads: Union[list[dict], None] = None
 ) -> None:
     """
     Creates (or resets) a *Linear Modal History* load case and configures it.
