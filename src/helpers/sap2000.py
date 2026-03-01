@@ -9,6 +9,7 @@ from collections import defaultdict
 import comtypes.client
 import numpy as np
 import warnings
+import copy
 
 import helpers.outils as outils
 
@@ -3045,6 +3046,201 @@ def get_asolid_area_property(SapModel, Name):
     return output
 
 
+def get_frame_section_type(SapModel, Name):
+    """
+    Retrieves the property type of a frame section.
+
+    Wrapper for SapModel.PropFrame.GetTypeOAPI.
+
+    Parameters
+    ----------
+    SapModel : object
+        The SapModel COM object.
+    Name : str
+        The name of an existing frame section property.
+
+    Returns
+    -------
+    dict or None
+        Dictionary with keys:
+            - 'TypeCode' (int)
+            - 'TypeName' (str)
+            - 'TypeBool' (dict of flags)
+        Returns None if retrieval fails.
+    """
+    type_map = {
+        1: "I",
+        2: "channel",
+        3: "tee",
+        4: "angle",
+        5: "double_angle",
+        6: "tube",                 # Box in CSI → tube
+        7: "pipe",
+        8: "rectangular",
+        9: "circle",
+        10: "General",
+        11: "double_channel",
+        13: "SD",
+        14: "Nonprismatic",
+        15: "steel_joist",
+        17: "cold_C",
+        19: "cold_Z",
+        20: "cold_L",
+        22: "cold_Hat",
+        23: "cover_plated_I",
+        24: "precastI",
+        25: "precastU",
+        26: "hybrid_I",
+        27: "hybrid_U",
+        41: "precastSuperT",
+        42: "cold_Box",
+        43: "cold_I",
+        44: "cold_Pipe",
+        45: "cold_T",
+        46: "trapezoidal",
+    }
+
+    prop_type, ret = SapModel.PropFrame.GetTypeOAPI(Name)
+    if ret != 0:
+        return None
+    return {
+        "TypeCode": prop_type,
+        "TypeName": type_map.get(prop_type, f"Unknown({prop_type})")
+    }
+
+
+def set_frame_property_modifiers(SapModel, modifier_dict):
+    """
+    Updates frame section property modifiers using SapModel.PropFrame.SetModifiers.
+    If only a subset of modifiers is provided, the rest are preserved.
+
+    Parameters
+    ----------
+    SapModel : SAP2000 model object
+    modifier_dict : dict
+        Dictionary in the format:
+        {
+            "FrameName1": {"A": 1.0, "I2": 0.8, ...},
+            "FrameName2": {"J": 0.9, "M": 1.1, ...}
+        }
+
+    Notes
+    -----
+    Mapping of modifier keys to SAP2000 array indices:
+        "A"  -> 0  (Cross-sectional area)
+        "A2" -> 1  (Shear area local 2)
+        "A3" -> 2  (Shear area local 3)
+        "J"  -> 3  (Torsional constant)
+        "I2" -> 4  (Inertia local 2)
+        "I3" -> 5  (Inertia local 3)
+        "M"  -> 6  (Mass modifier)
+        "W"  -> 7  (Weight modifier)
+    """
+    key_to_index = {
+        "A": 0,
+        "A2": 1,
+        "A3": 2,
+        "J": 3,
+        "I2": 4,
+        "I3": 5,
+        "M": 6,
+        "W": 7,
+    }
+
+    for frame_name, updates in modifier_dict.items():
+        # Get current values (length 8)
+        current_values = [0.0] * 8
+        output = SapModel.PropFrame.GetModifiers(frame_name, current_values)
+        modifiers, ret = output
+        modifiers = list(modifiers)
+        if ret != 0:
+            raise_warning(f"Could not get modifiers for '{frame_name}'", ret)
+            continue
+
+        # Update specified ones
+        for key, val in updates.items():
+            if key not in key_to_index:
+                raise ValueError(
+                    f"[FS] Invalid modifier key '{key}' for frame '{frame_name}'. "
+                    f"Allowed: {list(key_to_index.keys())}"
+                )
+            idx = key_to_index[key]
+            modifiers[idx] = val
+
+        # Set updated values
+        output = SapModel.PropFrame.SetModifiers(frame_name, modifiers)
+        modifiers, ret = output
+        raise_warning(f"Set modifiers for '{frame_name}'", ret)
+
+
+def set_area_property_modifiers(SapModel, modifier_dict):
+    """
+    Updates area property modifiers using SapModel.PropArea.SetModifiers.
+    If only a subset of modifiers is provided, the rest are preserved.
+
+    Parameters
+    ----------
+    SapModel : SAP2000 model object
+    modifier_dict : dict
+        Dictionary in the format:
+        {
+            "AreaName1": {"f11": 0.9, "m11": 0.8, ...},
+            "AreaName2": {"v13": 1.1, "W": 0.95, ...}
+        }
+
+    Notes
+    -----
+    Mapping of modifier keys to SAP2000 array indices:
+        "f11" -> 0  (Membrane f11)
+        "f22" -> 1  (Membrane f22)
+        "f12" -> 2  (Membrane f12)
+        "m11" -> 3  (Bending m11)
+        "m22" -> 4  (Bending m22)
+        "m12" -> 5  (Bending m12)
+        "v13" -> 6  (Shear v13)
+        "v23" -> 7  (Shear v23)
+        "M"   -> 8  (Mass modifier)
+        "W"   -> 9  (Weight modifier)
+    """
+    key_to_index = {
+        "f11": 0,
+        "f22": 1,
+        "f12": 2,
+        "m11": 3,
+        "m22": 4,
+        "m12": 5,
+        "v13": 6,
+        "v23": 7,
+        "M": 8,
+        "W": 9,
+    }
+
+    for area_name, updates in modifier_dict.items():
+        # Get current values (length 10)
+        current_values = [0.0] * 10
+        output = SapModel.PropArea.GetModifiers(area_name, current_values)
+        modifiers, ret = output
+        modifiers = list(modifiers)
+        if ret != 0:
+            raise_warning(f"Could not get modifiers for area '{area_name}'", ret)
+            continue
+
+        # Update specified ones
+        for key, val in updates.items():
+            if key not in key_to_index:
+                raise ValueError(
+                    f"[AS] Invalid modifier key '{key}' for area '{area_name}'. "
+                    f"Allowed: {list(key_to_index.keys())}"
+                )
+            idx = key_to_index[key]
+            modifiers[idx] = val
+
+        # Set updated values
+        output = SapModel.PropArea.SetModifiers(area_name, modifiers)
+        modifiers, ret = output
+        raise_warning(f"Set modifiers for area '{area_name}'", ret)
+
+
 def set_areaproperty(area_dict, SapModel):
     """
     Updates an area property in SAP2000 using the appropriate setter
@@ -3057,6 +3253,2900 @@ def set_areaproperty(area_dict, SapModel):
             dict of property overrides to apply. The structure should match that
             returned by get_area_property, possibly updated.
     """
+    for Name in area_dict:
+        area_dict_i = outils.get_area_property(SapModel, Name)
+        area_dict_i.update(area_dict[Name])  # Update with new values
+
+        if area_dict_i.get('is_shell'):
+            # Extract fields with fallbacks
+            ShellType = area_dict_i.get('ShellType')
+            IncludeDrillingDOF = area_dict_i.get('IncludeDrillingDOF')
+            MatProp = area_dict_i.get('MatProp')
+            MatAng = area_dict_i.get('MatAng')
+            Thickness = area_dict_i.get('Thickness')
+            Bending = area_dict_i.get('Bending')
+            Color = area_dict_i.get('Color', -1)
+            Notes = area_dict_i.get('Notes', "")
+            GUID = area_dict_i.get('GUID', "")
+
+            set_shell_area_property_1(
+                SapModel,
+                Name,
+                ShellType,
+                IncludeDrillingDOF,
+                MatProp,
+                MatAng,
+                Thickness,
+                Bending,
+                Color,
+                Notes,
+                GUID
+            )
+
+        elif area_dict_i.get('is_plane'):
+            PlaneType = area_dict_i.get('PlaneType')
+            MatProp = area_dict_i.get('MatProp')
+            MatAng = area_dict_i.get('MatAng')
+            Thickness = area_dict_i.get('Thickness')
+            Incompatible = area_dict_i.get('Incompatible')
+            Color = area_dict_i.get('Color', -1)
+            Notes = area_dict_i.get('Notes', "")
+            GUID = area_dict_i.get('GUID', "")
+
+            set_plane_area_property(
+                SapModel,
+                Name,
+                PlaneType,
+                MatProp,
+                MatAng,
+                Thickness,
+                Incompatible,
+                Color,
+                Notes,
+                GUID
+            )
+
+        elif area_dict_i.get('is_asolid'):
+            MatProp = area_dict_i.get('MatProp')
+            MatAng = area_dict_i.get('MatAng')
+            Arc = area_dict_i.get('Arc')
+            Incompatible = area_dict_i.get('Incompatible')
+            CSys = area_dict_i.get('CSys')
+            Color = area_dict_i.get('Color', -1)
+            Notes = area_dict_i.get('Notes', "")
+            GUID = area_dict_i.get('GUID', "")
+
+            set_asolid_area_property(
+                SapModel,
+                Name,
+                MatProp,
+                MatAng,
+                Arc,
+                Incompatible,
+                CSys,
+                Color,
+                Notes,
+                GUID
+            )
+        else:
+            raise_warning(f"Cannot set area property '{Name}': Type not identified.", 1)
+
+
+
+def get_I_section(SapModel, Name):
+    """
+    Retrieves properties of an I-type frame section using GetISection.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        A dictionary containing the I-section property data,
+        or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    tf = 0.0
+    tw = 0.0
+    t2b = 0.0
+    tfb = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetISection(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        t2b,
+        tfb,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, tf, tw, t2b, tfb,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get I-section frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    output = {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "tf": tf,
+        "tw": tw,
+        "t2b": t2b,
+        "tfb": tfb,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+    return output
+
+
+def get_SD_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a Section Designer (SD) section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section designer section name
+
+    Returns:
+        dict with keys:
+            MatProp, NumberItems, ShapeName, MyType, DesignType, Color, Notes, GUID
+    """
+    MatProp = ""
+    NumberItems = 0
+    ShapeName = []
+    MyType = []
+    DesignType = 0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetSDSection(
+        Name,
+        MatProp,
+        NumberItems,
+        ShapeName,
+        MyType,
+        DesignType,
+        Color,
+        Notes,
+        GUID,
+    )
+
+    [MatProp, NumberItems, ShapeName, MyType, DesignType, Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get SD section '{Name}'", ret)
+
+    return {
+        "MatProp": MatProp,
+        "NumberItems": NumberItems,
+        "ShapeName": ShapeName,
+        "MyType": MyType,
+        "DesignType": DesignType,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID,
+    }
+
+
+def get_tee_section(SapModel, Name):
+    """
+    Retrieves properties of a Tee-type frame section using GetTee.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        dict with the section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    tf = 0.0
+    tw = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetTee(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, tf, tw,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get tee frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "tf": tf,
+        "tw": tw,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_angle_section(SapModel, Name):
+    """
+    Retrieves properties of an Angle-type frame section using GetAngle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        dict with the section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    tf = 0.0
+    tw = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetAngle(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, tf, tw,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get angle frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "tf": tf,
+        "tw": tw,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_double_angle_section(SapModel, Name):
+    """
+    Retrieves properties of a Double-Angle-type frame section using GetDblAngle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        dict with the section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    tf = 0.0
+    tw = 0.0
+    dis = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetDblAngle(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        dis,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, tf, tw, dis,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get double-angle frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "tf": tf,
+        "tw": tw,
+        "dis": dis,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_double_channel_section(SapModel, Name):
+    """
+    Retrieves properties of a Double-Channel-type frame section using GetDblChannel.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        dict with the section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    tf = 0.0
+    tw = 0.0
+    dis = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetDblChannel(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        dis,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, tf, tw, dis,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get double-channel frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "tf": tf,
+        "tw": tw,
+        "dis": dis,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_pipe_section(SapModel, Name):
+    """
+    Retrieves properties of a Pipe-type frame section using GetPipe.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        dict with the section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    tw = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetPipe(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, tw,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get pipe frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,   # outside diameter
+        "tw": tw,   # wall thickness
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_tube_section(SapModel, Name):
+    """
+    Retrieves properties of a Tube-type frame section using GetTube.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        A dictionary containing the tube section property data,
+        or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    tf = 0.0
+    tw = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetTube(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, tf, tw,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get tube frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    output = {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "tf": tf,
+        "tw": tw,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+    return output
+
+
+def get_rectangular_section(SapModel, Name):
+    """
+    Retrieves properties of a Rectangular-type frame section using GetRectangle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        A dictionary containing the rectangular section property data,
+        or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetRectangle(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get rectangular frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    output = {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+    return output
+
+
+def get_circle_section(SapModel, Name):
+    """
+    Retrieves properties of a Circle-type frame section using GetCircle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        dict with the section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetCircle(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get circle frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,   # diameter
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_channel_section(SapModel, Name):
+    """
+    Retrieves properties of a Channel-type frame section using GetChannel.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the frame section property
+
+    Returns:
+        A dictionary containing the channel section property data,
+        or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    tf = 0.0
+    tw = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetChannel(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, tf, tw,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get channel frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    output = {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "tf": tf,
+        "tw": tw,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+    return output
+
+
+def get_cover_plated_I_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a Cover Plated I section.
+
+    Parameters
+    ----------
+    SapModel : object
+        SAP2000 model object
+    Name : str
+        Name of the frame section
+
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+            SectName, FyTopFlange, FyWeb, FyBotFlange,
+            tc, bc, MatPropTop, tcb, bcb, MatPropBot,
+            Color, Notes, GUID
+    """
+    SectName = ""
+    FyTopFlange = 0.0
+    FyWeb = 0.0
+    FyBotFlange = 0.0
+    tc = 0.0
+    bc = 0.0
+    MatPropTop = ""
+    tcb = 0.0
+    bcb = 0.0
+    MatPropBot = ""
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetCoverPlatedI(
+        Name,
+        SectName,
+        FyTopFlange,
+        FyWeb,
+        FyBotFlange,
+        tc,
+        bc,
+        MatPropTop,
+        tcb,
+        bcb,
+        MatPropBot,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Get cover plated I section '{Name}'", ret)
+
+    return {
+        "SectName": SectName,
+        "FyTopFlange": FyTopFlange,
+        "FyWeb": FyWeb,
+        "FyBotFlange": FyBotFlange,
+        "tc": tc,
+        "bc": bc,
+        "MatPropTop": MatPropTop,
+        "tcb": tcb,
+        "bcb": bcb,
+        "MatPropBot": MatPropBot,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID,
+    }
+
+
+def get_hybrid_I_section(SapModel, Name):
+    """
+    Retrieves properties of a Hybrid I-type frame section using GetHybridISection.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name
+
+    Returns:
+        dict with the section properties, or None if retrieval fails.
+    """
+    MatPropTopFlange = ""
+    MatPropWeb = ""
+    MatPropBotFlange = ""
+    t3 = 0.0
+    t2 = 0.0
+    TF = 0.0
+    TW = 0.0
+    t2b = 0.0
+    tfb = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetHybridISection(
+        Name,
+        MatPropTopFlange,
+        MatPropWeb,
+        MatPropBotFlange,
+        t3,
+        t2,
+        TF,
+        TW,
+        t2b,
+        tfb,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [MatPropTopFlange, MatPropWeb, MatPropBotFlange,
+     t3, t2, TF, TW, t2b, tfb,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get hybrid I-section frame property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "MatPropTopFlange": MatPropTopFlange,
+        "MatPropWeb": MatPropWeb,
+        "MatPropBotFlange": MatPropBotFlange,
+        "t3": t3,
+        "t2": t2,
+        "TF": TF,
+        "TW": TW,
+        "t2b": t2b,
+        "tfb": tfb,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_trapezoidal_section(SapModel, Name):
+    """
+    Retrieves properties of a trapezoidal-type frame section using GetTrapezoidal.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name
+
+    Returns:
+        dict with section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    t2b = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetTrapezoidal(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        t2b,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, t2b, Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get trapezoidal frame section '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,       # Depth
+        "t2": t2,       # Top width
+        "t2b": t2b,     # Bottom width
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_C_section(SapModel, Name):
+    """
+    Retrieves properties of a cold-formed C-type frame section using GetColdC.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    Thickness = 0.0
+    Radius = 0.0
+    LipDepth = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetColdC(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        LipDepth,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, Thickness, Radius, LipDepth,
+     Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get cold-formed C section '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,               # Depth
+        "t2": t2,               # Width
+        "Thickness": Thickness, # Section thickness
+        "Radius": Radius,       # Corner radius
+        "LipDepth": LipDepth,   # Lip depth
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_Z_section(SapModel, Name):
+    """
+    Retrieves properties of a cold-formed Z-type frame section using GetColdZ.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with section properties, or None if retrieval fails.
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    Thickness = 0.0
+    Radius = 0.0
+    LipDepth = 0.0
+    LipAngle = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropFrame.GetColdZ(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        LipDepth,
+        LipAngle,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [FileName, MatProp, t3, t2, Thickness, Radius, LipDepth,
+     LipAngle, Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get cold-formed Z section '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    return {
+        "Name": Name,
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,               # Depth
+        "t2": t2,               # Width
+        "Thickness": Thickness, # Section thickness
+        "Radius": Radius,       # Corner radius
+        "LipDepth": LipDepth,   # Lip depth
+        "LipAngle": LipAngle,   # Lip angle [deg]
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_Box_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a cold formed box section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the section
+
+    Returns:
+        dict with keys:
+            FileName, MatProp, t3, t2, Thickness, Radius, Color, Notes, GUID
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    Thickness = 0.0
+    Radius = 0.0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetColdBox(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        Color,
+        Notes,
+        GUID
+    )
+
+    raise_warning(f"Get cold Box section '{Name}'", ret)
+
+    return {
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "Thickness": Thickness,
+        "Radius": Radius,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_Hat_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a cold formed hat-type frame section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the section
+
+    Returns:
+        dict with keys:
+            FileName, MatProp, t3, t2, Thickness, Radius, LipDepth, Color, Notes, GUID
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    Thickness = 0.0
+    Radius = 0.0
+    LipDepth = 0.0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetColdHat(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        LipDepth,
+        Color,
+        Notes,
+        GUID
+    )
+
+    raise_warning(f"Get cold Hat section '{Name}'", ret)
+
+    return {
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "Thickness": Thickness,
+        "Radius": Radius,
+        "LipDepth": LipDepth,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_I_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a cold formed I-shape frame section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with keys:
+            FileName, MatProp, t3, t2, t2b, Thickness, Radius, Color, Notes, GUID
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    t2b = 0.0
+    Thickness = 0.0
+    Radius = 0.0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetColdI(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        t2b,
+        Thickness,
+        Radius,
+        Color,
+        Notes,
+        GUID
+    )
+
+    raise_warning(f"Get cold I section '{Name}'", ret)
+
+    return {
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "t2b": t2b,
+        "Thickness": Thickness,
+        "Radius": Radius,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_L_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a cold formed Angle (L) frame section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with keys:
+            FileName, MatProp, t3, Thickness, Radius, LipDepth, Color, Notes, GUID
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    Thickness = 0.0
+    Radius = 0.0
+    LipDepth = 0.0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetColdL(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        Thickness,
+        Radius,
+        LipDepth,
+        Color,
+        Notes,
+        GUID
+    )
+
+    raise_warning(f"Get cold L section '{Name}'", ret)
+
+    return {
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "Thickness": Thickness,
+        "Radius": Radius,
+        "LipDepth": LipDepth,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_pipe_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a cold formed pipe section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with keys:
+            FileName, MatProp, t3, Thickness, Color, Notes, GUID
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    Thickness = 0.0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetColdPipe(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        Thickness,
+        Color,
+        Notes,
+        GUID
+    )
+
+    raise_warning(f"Get cold pipe section '{Name}'", ret)
+
+    return {
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "Thickness": Thickness,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_cold_T_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a cold formed T (Tee) section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with keys:
+            FileName, MatProp, t3, t2, Thickness, Radius, Color, Notes, GUID
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = 0.0
+    t2 = 0.0
+    Thickness = 0.0
+    Radius = 0.0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetColdT(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        Color,
+        Notes,
+        GUID
+    )
+
+    raise_warning(f"Get cold T section '{Name}'", ret)
+
+    return {
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "Thickness": Thickness,
+        "Radius": Radius,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_general_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a General section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with keys:
+            FileName, MatProp, t3, t2, Area, As2, As3, Torsion,
+            I22, I33, S22, S33, Z22, Z33, R22, R33,
+            Color, Notes, GUID
+    """
+    FileName = ""
+    MatProp = ""
+    t3 = t2 = Area = As2 = As3 = Torsion = 0.0
+    I22 = I33 = S22 = S33 = Z22 = Z33 = R22 = R33 = 0.0
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetGeneral(
+        Name,
+        FileName,
+        MatProp,
+        t3,
+        t2,
+        Area,
+        As2,
+        As3,
+        Torsion,
+        I22,
+        I33,
+        S22,
+        S33,
+        Z22,
+        Z33,
+        R22,
+        R33,
+        Color,
+        Notes,
+        GUID
+    )
+
+    raise_warning(f"Get general section '{Name}'", ret)
+
+    return {
+        "FileName": FileName,
+        "MatProp": MatProp,
+        "t3": t3,
+        "t2": t2,
+        "Area": Area,
+        "As2": As2,
+        "As3": As3,
+        "Torsion": Torsion,
+        "I22": I22,
+        "I33": I33,
+        "S22": S22,
+        "S33": S33,
+        "Z22": Z22,
+        "Z33": Z33,
+        "R22": R22,
+        "R33": R33,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def get_nonprismatic_section(SapModel, Name):
+    """
+    Retrieves frame section property data for a NonPrismatic section.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+
+    Returns:
+        dict with keys:
+            NumberItems, StartSec, EndSec, MyLength, MyType, EI33, EI22,
+            Color, Notes, GUID
+    """
+    NumberItems = 0
+    StartSec, EndSec, MyLength, MyType, EI33, EI22 = [], [], [], [], [], []
+    Color = 0
+    Notes = ""
+    GUID = ""
+
+    ret = SapModel.PropFrame.GetNonPrismatic(
+        Name,
+        NumberItems,
+        StartSec,
+        EndSec,
+        MyLength,
+        MyType,
+        EI33,
+        EI22,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Get nonprismatic section '{Name}'", ret)
+
+    return {
+        "NumberItems": NumberItems,
+        "StartSec": StartSec,
+        "EndSec": EndSec,
+        "MyLength": MyLength,
+        "MyType": MyType,
+        "EI33": EI33,
+        "EI22": EI22,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+
+def set_angle_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies an Angle-type frame section property using SetAngle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, vertical leg depth [L]
+        t2: float, horizontal leg width [L]
+        tf: float, horizontal leg thickness [L]
+        tw: float, vertical leg thickness [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetAngle(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set angle frame property '{Name}'", ret)
+
+
+def set_double_angle_section(SapModel, Name, MatProp, t3, t2, tf, tw, dis, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Double-Angle-type frame section property using SetDblAngle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, vertical leg depth [L]
+        t2: float, total width = sum of horizontal leg widths + back-to-back distance [L]
+        tf: float, horizontal leg thickness [L]
+        tw: float, vertical leg thickness [L]
+        dis: float, back-to-back distance between the angles [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetDblAngle(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        dis,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set double-angle frame property '{Name}'", ret)
+
+
+def set_double_channel_section(SapModel, Name, MatProp, t3, t2, tf, tw, dis, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Double-Channel-type frame section property using SetDblChannel.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, total width (sum of flange widths + back-to-back distance) [L]
+        tf: float, flange thickness [L]
+        tw: float, web thickness [L]
+        dis: float, back-to-back distance between the channels [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetDblChannel(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        dis,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set double-channel frame property '{Name}'", ret)
+
+
+def set_pipe_section(SapModel, Name, MatProp, t3, tw, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Pipe-type frame section property using SetPipe.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, outside diameter [L]
+        tw: float, wall thickness [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetPipe(
+        Name,
+        MatProp,
+        t3,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set pipe frame property '{Name}'", ret)
+
+
+def set_tee_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Tee-type frame section property using SetTee.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, flange width [L]
+        tf: float, flange thickness [L]
+        tw: float, web thickness [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetTee(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set tee frame property '{Name}'", ret)
+
+
+def set_rectangular_section(SapModel, Name, MatProp, t3, t2, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a rectangular frame section property using SetRectangle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section property name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, section width [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetRectangle(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set rectangular frame property '{Name}'", ret)
+
+
+def set_I_section(SapModel, Name, MatProp, t3, t2, tf, tw, t2b, tfb, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies an I-type frame section property using SetISection.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, top flange width [L]
+        tf: float, top flange thickness [L]
+        tw: float, web thickness [L]
+        t2b: float, bottom flange width [L]
+        tfb: float, bottom flange thickness [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetISection(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        t2b,
+        tfb,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set I-section frame property '{Name}'", ret)
+
+
+def set_channel_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Channel-type frame section property using SetChannel.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, flange width [L]
+        tf: float, flange thickness [L]
+        tw: float, web thickness [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetChannel(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set channel frame property '{Name}'", ret)
+
+
+def set_tube_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Tube-type frame section property using SetTube.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, section width [L]
+        tf: float, flange thickness [L]
+        tw: float, web thickness [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetTube(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        tf,
+        tw,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set tube frame property '{Name}'", ret)
+
+
+def set_circle_section(SapModel, Name, MatProp, t3, Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Circle-type frame section property using SetCircle.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatProp: str, material property name
+        t3: float, section diameter [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetCircle(
+        Name,
+        MatProp,
+        t3,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set circle frame property '{Name}'", ret)
+
+
+def set_cover_plated_I_section(
+    SapModel,
+    Name,
+    SectName,
+    FyTopFlange,
+    FyWeb,
+    FyBotFlange,
+    tc,
+    bc,
+    MatPropTop,
+    tcb,
+    bcb,
+    MatPropBot,
+    Color=-1,
+    Notes="",
+    GUID=""
+):
+    """
+    Sets or modifies a Cover Plated I frame section property.
+
+    Parameters
+    ----------
+    SapModel : object
+        SAP2000 model object
+    Name : str
+        Frame section name (existing = modifies, new = creates)
+    SectName : str
+        Name of existing I-type section used as base
+    FyTopFlange, FyWeb, FyBotFlange : float
+        Yield strengths for flange/web [F/L2]
+    tc, bc : float
+        Top cover plate thickness & width [L]
+    MatPropTop : str
+        Material property for top cover plate
+    tcb, bcb : float
+        Bottom cover plate thickness & width [L]
+    MatPropBot : str
+        Material property for bottom cover plate
+    Color : int
+        Display color (-1 = auto)
+    Notes : str
+        Optional notes
+    GUID : str
+        Optional GUID ("" = auto)
+    """
+    ret = SapModel.PropFrame.SetCoverPlatedI(
+        Name,
+        SectName,
+        FyTopFlange,
+        FyWeb,
+        FyBotFlange,
+        tc,
+        bc,
+        MatPropTop,
+        tcb,
+        bcb,
+        MatPropBot,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cover plated I frame property '{Name}'", ret)
+
+
+def set_hybrid_I_section(SapModel, Name,
+                         MatPropTopFlange, MatPropWeb, MatPropBotFlange,
+                         t3, t2, TF, TW, t2b, tfb,
+                         Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a Hybrid I-type frame section property using SetHybridISection.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, frame section name (existing = modifies, new = creates)
+        MatPropTopFlange: str, material for top flange
+        MatPropWeb: str, material for web
+        MatPropBotFlange: str, material for bottom flange
+        t3: float, section height [L]
+        t2: float, top flange width [L]
+        TF: float, top flange thickness [L]
+        TW: float, web thickness [L]
+        t2b: float, bottom flange width [L]
+        tfb: float, bottom flange thickness [L]
+        Color: int, display color (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropFrame.SetHybridISection(
+        Name,
+        MatPropTopFlange,
+        MatPropWeb,
+        MatPropBotFlange,
+        t3,
+        t2,
+        TF,
+        TW,
+        t2b,
+        tfb,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set hybrid I-section frame property '{Name}'", ret)
+
+
+def set_trapezoidal_section(SapModel, Name,
+                            MatProp, t3, t2, t2b,
+                            Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a trapezoidal-type frame section property using SetTrapezoidal.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property
+        t3: float, section depth [L]
+        t2: float, section top width [L]
+        t2b: float, section bottom width [L]
+        Color: int, optional color (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetTrapezoidal(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        t2b,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set trapezoidal frame section '{Name}'", ret)
+
+
+def set_cold_C_section(SapModel, Name,
+                  MatProp, t3, t2, Thickness, Radius, LipDepth,
+                  Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a cold-formed C-type frame section property using SetColdC.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property
+        t3: float, section depth [L]
+        t2: float, section width [L]
+        Thickness: float, section thickness [L]
+        Radius: float, corner radius [L]
+        LipDepth: float, lip depth [L]
+        Color: int, optional color (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdC(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        LipDepth,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold-formed C section '{Name}'", ret)
+
+
+def set_cold_Z_section(SapModel, Name,
+                  MatProp, t3, t2, Thickness, Radius, LipDepth, LipAngle,
+                  Color=-1, Notes="", GUID=""):
+    """
+    Sets or modifies a cold-formed Z-type frame section property using SetColdZ.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property
+        t3: float, section depth [L]
+        t2: float, section width [L]
+        Thickness: float, section thickness [L]
+        Radius: float, corner radius [L]
+        LipDepth: float, lip depth [L]
+        LipAngle: float, lip angle [deg] (0 <= LipAngle <= 90)
+        Color: int, optional color (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdZ(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        LipDepth,
+        LipAngle,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold-formed Z section '{Name}'", ret)
+
+
+def set_cold_Box_section(SapModel, Name, MatProp, t3, t2, Thickness, Radius,
+                         Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a cold formed box frame section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, top flange width [L]
+        Thickness: float, section thickness [L]
+        Radius: float, corner radius [L]
+        Color: int, optional color (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdBox(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold Box section '{Name}'", ret)
+
+
+def set_cold_Hat_section(SapModel, Name, MatProp, t3, t2, Thickness, Radius, LipDepth,
+                         Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a cold formed hat-type frame section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, section width [L]
+        Thickness: float, section thickness [L]
+        Radius: float, corner radius [L]
+        LipDepth: float, lip depth [L]
+        Color: int, optional color (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdHat(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        LipDepth,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold Hat section '{Name}'", ret)
+
+
+def set_cold_I_section(SapModel, Name, MatProp, t3, t2, t2b, Thickness, Radius,
+                       Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a cold formed I-shape frame section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        t2: float, top flange width [L]
+        t2b: float, bottom flange width [L]
+        Thickness: float, section thickness [L]
+        Radius: float, corner radius [L]
+        Color: int, optional color (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdI(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        t2b,
+        Thickness,
+        Radius,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold I section '{Name}'", ret)
+
+
+def set_cold_L_section(SapModel, Name, MatProp, t3, Thickness, Radius, LipDepth,
+                       Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a cold formed Angle (L) frame section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property name
+        t3: float, section depth [L]
+        Thickness: float, section thickness [L]
+        Radius: float, corner radius [L]
+        LipDepth: float, lip depth [L]
+        Color: int, optional color (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdL(
+        Name,
+        MatProp,
+        t3,
+        Thickness,
+        Radius,
+        LipDepth,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold L section '{Name}'", ret)
+
+
+def set_cold_pipe_section(SapModel, Name, MatProp, t3, Thickness,
+                          Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a cold formed pipe section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property
+        t3: float, section depth [L]
+        Thickness: float, wall thickness [L]
+        Color: int, optional (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdPipe(
+        Name,
+        MatProp,
+        t3,
+        Thickness,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold pipe section '{Name}'", ret)
+
+
+def set_cold_T_section(SapModel, Name, MatProp, t3, t2, Thickness, Radius,
+                       Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a cold formed T (Tee) section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property
+        t3: float, section depth [L]
+        t2: float, top flange width [L]
+        Thickness: float, section thickness [L]
+        Radius: float, corner radius [L]
+        Color: int, optional (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetColdT(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        Thickness,
+        Radius,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set cold T section '{Name}'", ret)
+
+
+def set_general_section(SapModel, Name, MatProp, t3, t2, Area, As2, As3, Torsion,
+                        I22, I33, S22, S33, Z22, Z33, R22, R33,
+                        Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a General section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        MatProp: str, material property
+        t3: float, section depth [L]
+        t2: float, section width [L]
+        Area: float, cross-sectional area [L2]
+        As2: float, shear area in 2-axis [L2]
+        As3: float, shear area in 3-axis [L2]
+        Torsion: float, torsional constant [L4]
+        I22: float, moment of inertia about local 2 [L4]
+        I33: float, moment of inertia about local 3 [L4]
+        S22: float, section modulus about local 2 [L3]
+        S33: float, section modulus about local 3 [L3]
+        Z22: float, plastic modulus about local 2 [L3]
+        Z33: float, plastic modulus about local 3 [L3]
+        R22: float, radius of gyration about local 2 [L]
+        R33: float, radius of gyration about local 3 [L]
+        Color: int, optional (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetGeneral(
+        Name,
+        MatProp,
+        t3,
+        t2,
+        Area,
+        As2,
+        As3,
+        Torsion,
+        I22,
+        I33,
+        S22,
+        S33,
+        Z22,
+        Z33,
+        R22,
+        R33,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set general section '{Name}'", ret)
+
+
+def set_nonprismatic_section(SapModel, Name, NumberItems,
+                             StartSec, EndSec, MyLength, MyType, EI33, EI22,
+                             Color=-1, Notes="", GUID=""):
+    """
+    Initializes or modifies a NonPrismatic section property.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, section name
+        NumberItems: int, number of segments
+        StartSec: list of str, section names at segment start
+        EndSec: list of str, section names at segment end
+        MyLength: list of float, lengths of each segment
+        MyType: list of int, 1=Variable (relative), 2=Absolute
+        EI33: list of int, variation type for EI33 (1=Linear, 2=Parabolic, 3=Cubic)
+        EI22: list of int, variation type for EI22 (1=Linear, 2=Parabolic, 3=Cubic)
+        Color: int, optional (-1 = auto)
+        Notes: str, optional notes
+        GUID: str, optional GUID
+    """
+    ret = SapModel.PropFrame.SetNonPrismatic(
+        Name,
+        NumberItems,
+        StartSec,
+        EndSec,
+        MyLength,
+        MyType,
+        EI33,
+        EI22,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set nonprismatic section '{Name}'", ret)
+
+
+def set_shell_area_property_1(SapModel, Name, ShellType, IncludeDrillingDOF,
+                              MatProp, MatAng, Thickness, Bending,
+                              Color=-1, Notes="", GUID="") -> None:
+    """
+    Sets or modifies a shell-type area property using SetShell_1 (recommended SAP2000 API).
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, area property name (existing = modifies, new = creates)
+        ShellType: int, 1-6 (see SAP2000 doc)
+        IncludeDrillingDOF: bool, include drilling DOF? (ignored for types 3, 4, 6)
+        MatProp: str, material name (ignored for type 6)
+        MatAng: float, material angle [deg] (ignored for type 6)
+        Thickness: float, membrane thickness (ignored for type 6)
+        Bending: float, bending thickness (ignored for type 6)
+        Color: int, color code (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+
+    """
+    ret = SapModel.PropArea.SetShell_1(
+        Name,
+        ShellType,
+        IncludeDrillingDOF,
+        MatProp,
+        MatAng,
+        Thickness,
+        Bending,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set shell area property '{Name}'", ret)
+
+
+def set_plane_area_property(SapModel, Name, PlaneType, MatProp, MatAng,
+                            Thickness, Incompatible, Color=-1, Notes="", GUID="") -> None:
+    """
+    Sets or modifies a plane-type area property using SetPlane.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, area property name (existing = modifies, new = creates)
+        PlaneType: int, 1 = Plane-stress, 2 = Plane-strain
+        MatProp: str, material name
+        MatAng: float, material angle [deg]
+        Thickness: float, thickness
+        Incompatible: bool, include incompatible bending modes
+        Color: int, color code (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropArea.SetPlane(
+        Name,
+        PlaneType,
+        MatProp,
+        MatAng,
+        Thickness,
+        Incompatible,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set plane area property '{Name}'", ret)
+
+
+def set_asolid_area_property(SapModel, Name, MatProp, MatAng, Arc,
+                             Incompatible, CSys="Global", Color=-1, Notes="", GUID="") -> None:
+    """
+    Sets or modifies an asolid-type area property using SetAsolid.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, area property name (existing = modifies, new = creates)
+        MatProp: str, material name
+        MatAng: float, material angle [deg]
+        Arc: float, arc angle [deg] (0 means 1 radian ~57.3 deg)
+        Incompatible: bool, include incompatible bending modes
+        CSys: str, coordinate system ("Global" default)
+        Color: int, color code (-1 = auto assigned)
+        Notes: str, optional notes
+        GUID: str, optional GUID ("" = auto assigned)
+    """
+    ret = SapModel.PropArea.SetAsolid(
+        Name,
+        MatProp,
+        MatAng,
+        Arc,
+        Incompatible,
+        CSys,
+        Color,
+        Notes,
+        GUID
+    )
+    raise_warning(f"Set asolid area property '{Name}'", ret)
+
+
+def get_shell_area_property_1(SapModel, Name):
+    """
+    Retrieves properties of a shell-type area section using GetShell_1.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the area property
+
+    Returns:
+        A dictionary containing the area property data, or None if retrieval fails.
+    """
+    ShellType = 0
+    IncludeDrillingDOF = False
+    MatProp = ""
+    MatAng = 0.0
+    Thickness = 0.0
+    Bending = 0.0
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropArea.GetShell_1(
+        Name,
+        ShellType,
+        IncludeDrillingDOF,
+        MatProp,
+        MatAng,
+        Thickness,
+        Bending,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [ShellType, IncludeDrillingDOF, MatProp, MatAng,
+     Thickness, Bending, Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get shell area property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    output = {
+        "Name": Name,
+        "ShellType": ShellType,
+        "IncludeDrillingDOF": IncludeDrillingDOF,
+        "MatProp": MatProp,
+        "MatAng": MatAng,
+        "Thickness": Thickness,
+        "Bending": Bending,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+    return output
+
+
+def get_plane_area_property(SapModel, Name):
+    """
+    Retrieves properties of a plane-type area section using GetPlane.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the area property
+
+    Returns:
+        A dictionary containing the area property data, or None if retrieval fails.
+    """
+    MyType = 0
+    MatProp = ""
+    MatAng = 0.0
+    Thickness = 0.0
+    Incompatible = False
+    Color = -1
+    Notes = ""
+    GUID = ""
+
+    output = SapModel.PropArea.GetPlane(
+        Name,
+        MyType,
+        MatProp,
+        MatAng,
+        Thickness,
+        Incompatible,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [MyType, MatProp, MatAng, Thickness,
+     Incompatible, Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get plane area property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    output = {
+        "Name": Name,
+        "PlaneType": MyType,
+        "MatProp": MatProp,
+        "MatAng": MatAng,
+        "Thickness": Thickness,
+        "Incompatible": Incompatible,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+    return output
+
+
+def get_asolid_area_property(SapModel, Name):
+    """
+    Retrieves properties of an asolid-type area section (template).
+
+    Parameters:
+        SapModel: SAP2000 model object
+        Name: str, name of the area property
+
+    Returns:
+        A dictionary containing the area property data, or None if retrieval fails.
+    """
+    # These are placeholder variables — update with actual API signature and fields
+    MatProp = ""
+    MatAng = 0.0
+    Arc = False
+    Incompatible = False
+    CSys = ""
+    Color = -1
+    Notes = ""
+    GUID = ""
+    
+    output = SapModel.PropArea.GetAsolid(
+        Name,
+        MatProp,
+        MatAng,
+        Arc,
+        Incompatible,
+        CSys,
+        Color,
+        Notes,
+        GUID
+    )
+
+    [MatProp, MatAng, Arc, Incompatible, CSys,
+        Color, Notes, GUID, ret] = output
+
+    raise_warning(f"Get asolid area property '{Name}'", ret)
+
+    if ret != 0:
+        return None
+
+    output = {
+        "Name": Name,
+        "MatProp": MatProp,
+        "MatAng": MatAng,
+        "Arc": Arc,
+        "Incompatible": Incompatible,
+        "CSys": CSys,
+        "Color": Color,
+        "Notes": Notes,
+        "GUID": GUID
+    }
+
+    return output
+
+
+def set_frame_property(frame_dict, SapModel):
+    """
+    Updates frame section:
+        -> Modifiers
+        -> Properties (based on the detected section type)
+
+    Parameters:
+        SapModel: SAP2000 model object
+        frame_dict: dict
+            A dictionary where each key is a frame section name, and each value
+            is a dict of property overrides to apply.
+    """
+    # 1) Set modifiers
+    modifier_dict = dict()
+    for Name, frame_dict_i in frame_dict.items():
+        if frame_dict_i.get('Modifiers'):
+            modifier_dict[Name] = frame_dict_i.get('Modifiers')
+    set_frame_property_modifiers(SapModel, modifier_dict)
+
+    # 2) Set geometric properties
+    for Name in frame_dict:
+        frame_dict_i = outils.get_frame_property(SapModel, Name)
+        frame_dict_i.update(frame_dict[Name])  # merge updates
+
+        if frame_dict_i.get('is_I'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            tf = frame_dict_i.get('tf')
+            tw = frame_dict_i.get('tw')
+            t2b = frame_dict_i.get('t2b')
+            tfb = frame_dict_i.get('tfb')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_I_section(SapModel, Name, MatProp, t3, t2, tf, tw, t2b, tfb, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_channel'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            tf = frame_dict_i.get('tf')
+            tw = frame_dict_i.get('tw')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_channel_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_tee'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            tf = frame_dict_i.get('tf')
+            tw = frame_dict_i.get('tw')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_tee_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_angle'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            tf = frame_dict_i.get('tf')
+            tw = frame_dict_i.get('tw')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_angle_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_double_angle'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            tf = frame_dict_i.get('tf')
+            tw = frame_dict_i.get('tw')
+            Separation = frame_dict_i.get('Separation')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_double_angle_section(SapModel, Name, MatProp, t3, t2, tf, tw, Separation, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_double_channel'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            tf = frame_dict_i.get('tf')
+            tw = frame_dict_i.get('tw')
+            Separation = frame_dict_i.get('Separation')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_double_channel_section(SapModel, Name, MatProp, t3, t2, tf, tw, Separation, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_pipe'):
+            MatProp = frame_dict_i.get('MatProp')
+            OD = frame_dict_i.get('t3')
+            Thickness = frame_dict_i.get('tw')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_pipe_section(SapModel, Name, MatProp, OD, Thickness, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_tube'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            tf = frame_dict_i.get('tf')
+            tw = frame_dict_i.get('tw')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_tube_section(SapModel, Name, MatProp, t3, t2, tf, tw, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_rectangular'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_rectangular_section(SapModel, Name, MatProp, t3, t2, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_circle'):
+            MatProp = frame_dict_i.get('MatProp')
+            Diameter = frame_dict_i.get('t3')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_circle_section(SapModel, Name, MatProp, Diameter, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_steel_joist'):
+            # TODO -> steel_joist function not available (or not found) in the OAPI
+            pass
+
+        elif frame_dict_i.get('is_hybrid_I'):
+            MatPropTopFlange = frame_dict_i.get('MatPropTopFlange')
+            MatPropWeb = frame_dict_i.get('MatPropWeb')
+            MatPropBotFlange = frame_dict_i.get('MatPropBotFlange')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            TF = frame_dict_i.get('TF')
+            TW = frame_dict_i.get('TW')
+            t2b = frame_dict_i.get('t2b')
+            tfb = frame_dict_i.get('tfb')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_hybrid_I_section(
+                SapModel, Name,
+                MatPropTopFlange, MatPropWeb, MatPropBotFlange,
+                t3, t2, TF, TW, t2b, tfb,
+                Color, Notes, GUID
+            )
+
+        elif frame_dict_i.get('is_hybrid_U'):
+            # TODO: Implement set_hybrid_U
+            pass
+
+        elif frame_dict_i.get('is_trapezoidal'):
+            MatProp = frame_dict_i.get('MatProp')
+            Dimensions = frame_dict_i.get('Dimensions')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_trapezoidal_section(SapModel, Name, MatProp, Dimensions, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_precastI'):
+            # TODO: Implement set_precastI
+            pass
+
+        elif frame_dict_i.get('is_precastU'):
+            # TODO: Implement set_precastU
+            pass
+
+        elif frame_dict_i.get('is_precastSuperT'):
+            # TODO: Implement is_precastSuperT
+            pass
+
+        elif frame_dict_i.get('is_cold_C'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            Thickness = frame_dict_i.get('Thickness')
+            Radius = frame_dict_i.get('Radius')
+            LipDepth = frame_dict_i.get('LipDepth')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_C_section(SapModel, Name, MatProp, t3, t2, Thickness, Radius, LipDepth, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_cold_Z'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            Thickness = frame_dict_i.get('Thickness')
+            Radius = frame_dict_i.get('Radius')
+            LipDepth = frame_dict_i.get('LipDepth')
+            LipAngle = frame_dict_i.get('LipAngle')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_Z_section(SapModel, Name, MatProp, t3, t2, Thickness, Radius, LipDepth, LipAngle, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_cold_Box'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            Thickness = frame_dict_i.get('Thickness')
+            Radius = frame_dict_i.get('Radius')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_Box_section(
+                SapModel, Name, MatProp,
+                t3, t2, Thickness, Radius,
+                Color, Notes, GUID
+            )
+
+        elif frame_dict_i.get('is_cold_I'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            t2b = frame_dict_i.get('t2b')
+            Thickness = frame_dict_i.get('Thickness')
+            Radius = frame_dict_i.get('Radius')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_I_section(SapModel, Name, MatProp, t3, t2, t2b, Thickness, Radius, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_cold_L'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            Thickness = frame_dict_i.get('Thickness')
+            Radius = frame_dict_i.get('Radius')
+            LipDepth = frame_dict_i.get('LipDepth')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_L_section(SapModel, Name, MatProp, t3, Thickness, Radius, LipDepth, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_cold_T'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            Thickness = frame_dict_i.get('Thickness')
+            Radius = frame_dict_i.get('Radius')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_T_section(SapModel, Name, MatProp, t3, t2, Thickness, Radius, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_cold_Hat'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            Thickness = frame_dict_i.get('Thickness')
+            Radius = frame_dict_i.get('Radius')
+            LipDepth = frame_dict_i.get('LipDepth')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_Hat_section(SapModel, Name, MatProp, t3, t2, Thickness, Radius, LipDepth, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_cold_Pipe'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            Thickness = frame_dict_i.get('Thickness')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_cold_pipe_section(SapModel, Name, MatProp, t3, Thickness, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_General'):
+            MatProp = frame_dict_i.get('MatProp')
+            t3 = frame_dict_i.get('t3')
+            t2 = frame_dict_i.get('t2')
+            Area = frame_dict_i.get('Area')
+            As2 = frame_dict_i.get('As2')
+            As3 = frame_dict_i.get('As3')
+            Torsion = frame_dict_i.get('Torsion')
+            I22 = frame_dict_i.get('I22')
+            I33 = frame_dict_i.get('I33')
+            S22 = frame_dict_i.get('S22')
+            S33 = frame_dict_i.get('S33')
+            Z22 = frame_dict_i.get('Z22')
+            Z33 = frame_dict_i.get('Z33')
+            R22 = frame_dict_i.get('R22')
+            R33 = frame_dict_i.get('R33')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_general_section(SapModel, Name, MatProp, t3, t2, Area, As2, As3, Torsion,
+                                I22, I33, S22, S33, Z22, Z33, R22, R33, Color, Notes, GUID)
+
+        elif frame_dict_i.get('is_Nonprismatic'):
+            NumberItems = frame_dict_i.get('NumberItems')
+            StartSec = frame_dict_i.get('StartSec')
+            EndSec = frame_dict_i.get('EndSec')
+            MyLength = frame_dict_i.get('MyLength')
+            MyType = frame_dict_i.get('MyType')
+            EI33 = frame_dict_i.get('EI33')
+            EI22 = frame_dict_i.get('EI22')
+            Color = frame_dict_i.get('Color', -1)
+            Notes = frame_dict_i.get('Notes', "")
+            GUID = frame_dict_i.get('GUID', "")
+
+            set_nonprismatic_section(SapModel, Name, NumberItems, StartSec, EndSec, MyLength, MyType,
+                                     EI33, EI22, Color, Notes, GUID)
+        else:
+            raise_warning(
+                f"Cannot set frame property '{Name}': Type not identified.", 1
+            )
+
+
+def set_frame_obj_modifiers(frame_dict, SapModel, group=True):
+    """
+    Future improvement: allow for a group as input -> then loop
+
+    Updates frame object modifiers using SapModel.FrameObj.SetModifiers.
+    If only a subset of modifiers is provided, the rest are preserved.
+
+    Parameters:
+        SapModel: SAP2000 model object
+        frame_dict: dict
+            A dictionary where each key is a frame object (e.g. '1'), and each value
+            is a dict of modifiers overrides to apply.
+
+    Updates frame object modifiers using SapModel.FrameObj.SetModifiers.
+
+    Notes
+    -----
+    Mapping of modifier keys to SAP2000 array indices:
+        "A"  -> 0  (Cross-sectional area)
+        "A2" -> 1  (Shear area local 2)
+        "A3" -> 2  (Shear area local 3)
+        "J"  -> 3  (Torsional constant)
+        "I2" -> 4  (Inertia local 2)
+        "I3" -> 5  (Inertia local 3)
+        "M"  -> 6  (Mass modifier)
+        "W"  -> 7  (Weight modifier)
+
+    Important: do not confuse this function (which updates the modifiers of a frame
+    object (e.g. object '3'), with set_frame_property, which updates modifiers of a
+    frame section (e.g. section 'FSEC1')).
+    """
+    key_to_index = {
+        "A": 0,
+        "A2": 1,
+        "A3": 2,
+        "J": 3,
+        "I2": 4,
+        "I3": 5,
+        "M": 6,
+        "W": 7,
+    }
+
+    # 1) Get modifiers dict
+    modifier_dict = dict()
+    for Name, frame_dict_i in frame_dict.items():
+        if frame_dict_i.get('Modifiers'):
+            modifier_dict[Name] = frame_dict_i.get('Modifiers')
+
+    # If a group was provided, get frame objects in the group and apply the same modifiers to all
+    if group:
+        modifier_dict_groups = copy.deepcopy(modifier_dict)
+        modifier_dict = dict()
+        for group_name in modifier_dict_groups:
+            group_dict = get_group_assignments(SapModel, group_name)
+            for frame_name in group_dict['FrameObj']:
+                modifier_dict[frame_name] = modifier_dict_groups[group_name]
+
+    # 2) Update modifiers for each frame object
+    for frame_name, updates in modifier_dict.items():
+        # Get current values (length 8)
+        current_values = [0.0] * 8
+        output = SapModel.FrameObj.GetModifiers(frame_name, current_values)
+        modifiers, ret = output
+        modifiers = list(modifiers)
+        if ret != 0:
+            raise_warning(f"Could not get modifiers for '{frame_name}'", ret)
+            continue
+
+        # Update specified ones
+        for key, val in updates.items():
+            if key not in key_to_index:
+                raise ValueError(
+                    f"[FS] Invalid modifier key '{key}' for frame '{frame_name}'. "
+                    f"Allowed: {list(key_to_index.keys())}"
+                )
+            idx = key_to_index[key]
+            modifiers[idx] = val
+
+        # Set updated values
+        output = SapModel.FrameObj.SetModifiers(frame_name, modifiers)
+        modifiers, ret = output
+        raise_warning(f"Set modifiers for '{frame_name}'", ret)
+
+
+def set_areaproperty(area_dict, SapModel):
+    """
+    Updates an area property in SAP2000 using the appropriate setter
+    based on type (Shell, Plane, Asolid).
+
+    Parameters:
+        SapModel: SAP2000 model object
+        area_dict: dict
+            A dictionary where each key is an area property name, and each value is a
+            dict of property overrides to apply. The structure should match that
+            returned by get_area_property, possibly updated.
+    """
+    modifier_dict = dict()
+    for Name, area_dict_i in area_dict.items():
+        if area_dict_i.get('Modifiers'):
+            modifier_dict[Name] = area_dict_i.get('Modifiers')
+    set_area_property_modifiers(SapModel, modifier_dict)
+
     for Name in area_dict:
         area_dict_i = outils.get_area_property(SapModel, Name)
         area_dict_i.update(area_dict[Name])  # Update with new values

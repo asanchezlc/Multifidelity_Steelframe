@@ -1,0 +1,46 @@
+# Input Filenames (variables must include "filename")
+sap2000_filename=DA_uncalibrated_v7_updated_SamplesforHF.sdb    # sdb file in paths['sap2000_HF']
+
+# Output Filenames (variables must include "filename")
+sa_output_filename=samples_for_surrogate.h5    # (sometimes input) h5 file in paths['files_DA_output'] + 'sensitivity_analysis'
+errors_filename=errors.txt                         # txt file in paths['files_DA_output'] + 'sensitivity_analysis'
+process_filename=process.txt                       # txt file in paths['files_DA_output'] + 'sensitivity_analysis'
+fem_parameters_filename=fem_channels.json          # json file in paths['files_DA_output'] + 'sensitivity_analysis'
+input_parameters_filename=input_sobol.json
+
+# Sensitive variables & intervals [IMPORTANT: IN INTERNATIONAL SYSTEM UNITS]
+# Remark: formatting frame partial fixity: <sap2000_frame_group>/<Var (N,V2,V3,T,M2 or M3)>/<ii (init. fix.) or jj (final fix.)>/interv/<opt: log10>
+# Remark: formatting joint springs: <sap2000_joint_group>/<Var (U1...R3 or )>/interv/<opt: log10> 
+# Remark: formatting material properties: <material>/<Var: rho or E>/interv/<opt: log10>
+FOM/Column_1/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_2/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_3/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_4/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_5/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_6/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_7/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_8/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_9/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_10/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_11/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_12/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_13/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_14/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_15/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_16/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_17/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_18/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_19/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+FOM/Column_20/AA2A3JI2I3/interv=[0.1, 0.95]         # Interval for frame object multiplier
+# FS/3/t2/interv=[0, 1]
+
+# FEM options
+n_modes=10			     # Number of modes that will be retrieved (None for default)
+
+# Sampling strategy
+nsamples=2500                        # Desired number of samples to be generated (Sobol will increase it, and will be saved as nsamples_sobol)
+algorithm="sobol"                    # At the moment, the only implemented
+calc_second_order=False		     # If Sobol algorithm, allows to see relationships between 2 variables
+
+# COMMENTS
+# File used to see which stiffnesses affect the modal characteristics of the steel frame (previous to a massive input->output data generation)

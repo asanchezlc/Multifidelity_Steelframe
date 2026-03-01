@@ -1,0 +1,35 @@
+VarName;Path
+project;C:\Users\User\Documents\DOCTORADO_CODES\Multifidelity_Steelframe
+sap2000_exe;C:\Program Files\Computers and Structures\SAP2000 23
+offgit_save;C:\Users\User\Documents\DOCTORADO\TFM_Strain_Gauges\SaveFrom_TFM_Codes
+savefigures;C:\Users\User\Documents\DOCTORADO\Python_Figures\TFM_StrainGauges
+savefigures_damage_scenarios;C:\Users\User\Documents\DOCTORADO\Python_Figures\SteelFrame_Damage_Analysis
+savefigures_HR;C:\Users\User\Documents\DOCTORADO\Python_Figures\Hospital_Real
+rawdata_frame_oma;C:\Users\User\Documents\DOCTORADO_CODES\ARDUINO\ARDUINO_StrainGauge\ABMega\frame_records\oma
+rawdata_footbridge_simulated_oma;C:\Users\User\Documents\DOCTORADO_CODES\ARDUINO\ARDUINO_StrainGauge\ABMega\footbridge_simulated\oma
+rawdata_footbridge_AVT_20241210;C:\Users\User\Documents\DOCTORADO\Footbridge\AVT_20241210
+rawdata_footbridge_AVT_20241118;C:\Users\User\Documents\DOCTORADO\Footbridge\AVT_20241118
+rawdata_footbridge_AVT_20241218_strain;C:\Users\User\Documents\DOCTORADO\Footbridge\AVT_20241218_strain
+sap2000_footbridge_model;C:\Users\User\Documents\DOCTORADO\TFM_Strain_Gauges\SAP2000_Pasarela\modelos
+sap2000_DA;C:\Users\User\Documents\DOCTORADO_CODES\TFM_codes\src\sap2000\DA_Damage_Analysis
+sap2000_surrogate;C:\Users\User\Documents\DOCTORADO\SteelFrame\PythonData\Surrogate\sap2000
+sap2000_HF;C:\Users\User\Documents\DOCTORADO_CODES\Multifidelity_Steelframe\src\sap2000
+sap2000_HR;C:\Users\User\Documents\DOCTORADO\Hospital_Real\AutomatedOMA\sap2000\model_v12_Francesca_matching_torsional
+artemis_oma_output;C:\Users\User\Documents\ARTeMIS\TFM_Strain_Gauges
+artemis_oma_output_footbridge;C:\Users\User\Documents\ARTeMIS\simulated_oma
+MOVA_oma_output_footbridge;C:\Users\User\Documents\DOCTORADO\Footbridge\AVT_20241218_strain\MOVA_results
+MOVA_oma_output_footbridge_20251007;C:\Users\User\Documents\DOCTORADO\Footbridge\AVT_20251007_strain\mova_results\AVT_I
+MOVA_oma_output_footbridge_20251007_II;C:\Users\User\Documents\DOCTORADO\Footbridge\AVT_20251007_strain\mova_results\AVT_II
+MOVA_oma_output_frame;C:\Users\User\Documents\DOCTORADO\SteelFrame\MOVA
+HR_oma_output;C:\Users\User\Documents\DOCTORADO\Hospital_Real\AutomatedOMA\COV-SSI\Clustering
+files_tfm_output;C:\Users\User\Documents\DOCTORADO\TFM_Strain_Gauges\PythonData
+files_DA_output;C:\Users\User\Documents\DOCTORADO\SteelFrame\PythonData
+files_Multifidelity_output;C:\Users\User\Documents\DOCTORADO\Multifidelity_Steelframe\PythonData
+files_HR_output;C:\Users\User\Documents\DOCTORADO\Hospital_Real\PythonData
+treateddata_frame_oma;src\signals_for_oma\data
+treateddata_frame_oma_footbridge;src\signals_for_oma\data_simulated_oma
+treateddata_footbridge_avt_oma;C:\Users\User\Documents\DOCTORADO\Footbridge\AVT_20241218_strain\raw_data_wo_headers
+EfI_data;src\EfI_data
+EfI_data_footbridge;src\EfI_data_footbridge
+oma_results;src\oma_results
+# Remark: project must always be presented; for a path within the project, relative paths can be used

@@ -1,21 +1,1707 @@
 
+import ast
 import copy
+import json
 import re
 import os
 import shutil
 import psutil
 import warnings
 
+import scipy as sp
 import numpy as np
 import pandas as pd
 import sympy as sym
+import h5py
 
 import helpers.sap2000 as sap2000
 
+from dotenv import load_dotenv
 from scipy.linalg import eigh
 from typing import Any, List, Sequence
 
+from collections import defaultdict
+from datetime import datetime
 
+from SALib.sample.sobol import sample
+
+
+# Copied-pasted functions from TFM_codes
+
+def build_Phi_v2(sensors_nodes_correspondance, disp_modeshapes,
+                 return_positive_coordinates=True):
+    """
+    Builds Phi and Phi_id matrices for the given sensors and mode shapes.
+
+    Parameters:
+    ----------
+    sensors_nodes_correspondance : dict
+        Dictionary mapping sensor channel names to structural metadata.
+        Example:
+            {
+                'Channel_1': {
+                    'point': '5',
+                    'dir': [-1, 0, 0],        # direction vector
+                    'direction': '-U1' ...
+                },
+                ...
+            }
+
+    disp_modeshapes : dict
+        Dictionary containing modal displacement data from SAP2000.
+        Format:
+            {
+                'Mode_1': {
+                    'U1': [...], 'U2': [...], 'U3': [...],
+                    'R1': [...], 'R2': [...], 'R3': [...],
+                    'Joint_id': [<joint_id_1>, <joint_id_2>, ...]
+                },
+                ...
+            }
+
+    return_positive_coordinates : bool, default=True
+        If True, absolute values of direction vectors and positive direction labels are used
+        (i.e., '-U1' becomes 'U1' in Phi_id and direction vector becomes [1,0,0]).
+
+    Returns:
+    -------
+    Phi : np.ndarray
+        Array of shape (n_channels, n_modes), containing mode shape projections for each sensor.
+
+    Phi_id : list of str
+        Identifiers for each sensor, formatted as "<JointID>_<direction>".
+        These follow the order of channels and correspond to the rows of Phi.
+    """
+    n_channels = len(sensors_nodes_correspondance)
+    n_modes = len(disp_modeshapes)
+    Phi = np.zeros((n_channels, n_modes))
+    Phi_id = list()
+    for i_mode, mode in enumerate(disp_modeshapes):
+        mode_data = disp_modeshapes[mode]
+        joint_ids = mode_data['Joint_id']
+
+        for i_channel, channel in enumerate(sensors_nodes_correspondance):
+            channel_data = sensors_nodes_correspondance[channel]
+            point = channel_data['point']
+            dir_vec = channel_data['dir']
+            direction = channel_data['direction']
+            if return_positive_coordinates == True:
+                # Get absolute value of the direction
+                dir_vec = np.abs(dir_vec)
+                direction = direction.replace('-', '')  # Remove negative sign
+            Phi_id.append(
+                f"{point}_{direction}") if i_mode == 0 else None  # Add once
+
+            try:
+                j = joint_ids.index(point)  # index of joint in this mode
+            except ValueError:
+                raise ValueError(
+                    f"Point {point} not found in Joint_id for {mode}")
+
+            # Get displacement components
+            u = np.array([mode_data['U1'][j], mode_data['U2']
+                         [j], mode_data['U3'][j]])
+            projection = np.dot(dir_vec, u)
+            Phi[i_channel, i_mode] = projection
+
+    return Phi, Phi_id
+
+
+def get_modal_response_SA(input_data, sg_channels, acc_channels,
+                          element_section, section_properties_material, SapModel,
+                          groups_dict=None, n_modes=None):
+    """
+    IMPORTANT!!!!
+    In this case we are not updating properties of the sections neither
+    Young modulus; consequently, 'section_properties_material' can be
+    introduced as an input.
+    If we updated it, then it should be recalculated within this function
+
+    Function Duties:
+        Modifies sap model with data in input_data,
+        runs analysis and return modal results with
+        strain mode shapes
+
+    Input:
+        input_data: dictionary containing the parameters to be updated to each
+            group of elements
+
+        sg_channels and acc_channels: dictionaries containing the locations
+            of sgs and accs
+
+        element_section: dict
+            Contains the section assigned to each element
+
+        section_properties_material: dict
+            Contains the material properties of each section
+            (e.g., Young's modulus, Area, etc.; properties important to retrieve strain)
+
+        n_modes : int, optional
+            Number of modes to compute (used with modal cases).
+
+    Remark:
+        Specifically for the SA (Sensitivity Analysis)
+    """
+    # A) Unlock model and set IS units
+    sap2000.unlock_model(SapModel)
+    sap2000.set_ISunits(SapModel)
+
+    # B) Set new material properties
+    if 'MP' in input_data:
+        material_dict = input_data['MP']
+        sap2000.set_materials(material_dict, SapModel)
+
+    # C) Modify spring supports
+    if 'JS' in input_data:
+        group = groups_dict.get('JS') if groups_dict else True
+        joint_dict = input_data['JS']
+        sap2000.set_jointsprings(joint_dict, SapModel, group=group)
+
+    # D) Modify partial fixity
+    if 'FR' in input_data:
+        group = groups_dict.get('FR') if groups_dict else True
+        frame_releases_dict = input_data['FR']
+        sap2000.set_framereleases(frame_releases_dict, SapModel, group=group)
+
+    # E) Modify frame section
+    if 'FS' in input_data:
+        frame_dict = input_data['FS']
+        sap2000.set_frame_property(frame_dict, SapModel)
+
+    if 'FOM' in input_data:
+        group = groups_dict.get('FOM') if groups_dict else True
+        frame_obj_modifiers = input_data['FOM']
+        sap2000.set_frame_obj_modifiers(frame_obj_modifiers, SapModel, group=group)
+
+    # F) Modify area section
+    if 'AS' in input_data:
+        area_dict = input_data['AS']
+        sap2000.set_areaproperty(area_dict, SapModel)
+
+    # C) Run Analysis
+    sap2000.run_analysis(SapModel, max_modes=n_modes)
+
+    # D) Get Frequencies
+    frequencies = sap2000.get_modalfrequencies(SapModel)
+    frequencies = np.array([value['Frequency']
+                           for key, value in frequencies.items()])
+
+    # E) Get mode shapes in the locations given by acc_channels
+    Name_points_group = "modeshape_points"
+    disp_modeshapes = sap2000.get_displmodeshapes(Name_points_group, SapModel)
+    Phi, Phi_id = build_Phi_v2(acc_channels, disp_modeshapes,
+                               return_positive_coordinates=False)
+
+    # F) Get section properties: Uncomment if any of those properties were modified!
+    # Name_points_group, Name_elements_group = "allpoints", "allframes"
+    # _, all_elements, all_elements_stat = sap2000.getnames_point_elements(Name_points_group,
+    #                                                                             Name_elements_group,
+    #                                                                             SapModel)
+
+    # element_section = sap2000.get_elementsections(all_elements, all_elements_stat, SapModel)
+    # all_sections = list(set([element_section[i] for i in list(element_section)]))
+    # section_properties_material = sap2000.get_section_information(all_sections, SapModel)
+
+    # Modal Forces and strain modeshapes
+    Name_elements_group = 'modeshape_frames'
+    modal_forces = sap2000.get_modalforces(Name_elements_group, SapModel)
+    strain_modeshapes = get_strainmodeshapes(
+        modal_forces, element_section, section_properties_material)
+    Psi, Psi_id = build_Psi_v2(
+        sg_channels, strain_modeshapes, interpolate_modeshapes=True)
+
+    modal_results = {'frequencies': frequencies,
+                     'Phi': Phi,
+                     'Psi': Psi,
+                     'Phi_id': Phi_id,
+                     'Psi_id': Psi_id}
+
+    return modal_results
+
+
+
+def get_frame_property(SapModel, Name):
+    """
+    Attempts to retrieve frame section property data for the given Name.
+    Tries different section types (I, Rectangular, Pipe, Circle, Tube, etc.)
+    until one succeeds.
+
+    Returns:
+        Dictionary with property data, including flags:
+        {
+            'is_I': bool,
+            'is_channel': bool,
+            'is_tee': bool,
+            'is_angle': bool,
+            'is_double_angle': bool,
+            'is_double_channel': bool,
+            'is_pipe': bool,
+            'is_tube': bool,
+            ... (property fields depending on type)
+        }
+    """
+    flags = {
+        'is_I': False,
+        'is_channel': False,
+        'is_tee': False,
+        'is_angle': False,
+        'is_double_angle': False,
+        'is_double_channel': False,
+        'is_pipe': False,
+        'is_tube': False,
+        'is_rectangular': False,
+        'is_SD': False,
+        'is_circle': False,
+        'is_steel_joist': False,
+        'is_hybrid_I': False,
+        'is_hybrid_U': False,
+        'is_trapezoidal': False,
+        'is_precastI': False,
+        'is_precastU': False,
+        'is_precastSuperT': False,
+        'is_cold_C': False,
+        'is_cold_Z': False,
+        'is_cold_Box': False,
+        'is_cold_I': False,
+        'is_cold_L': False,
+        'is_cold_T': False,
+        'is_cold_Hat': False,
+        'is_cold_Pipe': False,
+        'is_General': False,
+        'is_Nonprismatic': False,
+        'is_cover_plated_I': False,
+    }
+
+    # Determine the type once
+    section_type = sap2000.get_frame_section_type(SapModel, Name)
+    type_name = section_type['TypeName']
+
+    if f"is_{type_name}" not in flags:
+        sap2000.raise_warning(
+            f"Frame property '{Name}' has unknown type code {section_type['TypeCode']} ({type_name}).",
+            1,
+        )
+        return {"flags": flags, "Type": section_type}
+
+    # Mark the flag
+    flags[f"is_{type_name}"] = True
+
+    # Dispatch based on type
+    output = None
+
+    if flags['is_I']:
+        output = sap2000.get_I_section(SapModel, Name)
+
+    elif flags['is_channel']:
+        output = sap2000.get_channel_section(SapModel, Name)
+
+    elif flags['is_angle']:
+        output = sap2000.get_angle_section(SapModel, Name)
+
+    elif flags['is_double_angle']:
+        output = sap2000.get_double_angle_section(SapModel, Name)
+
+    elif flags['is_double_channel']:
+        output = sap2000.get_double_channel_section(SapModel, Name)
+
+    elif flags['is_pipe']:
+        output = sap2000.get_pipe_section(SapModel, Name)
+
+    elif flags['is_tube']:
+        output = sap2000.get_tube_section(SapModel, Name)
+
+    elif flags['is_rectangular']:
+        output = sap2000.get_rectangular_section(SapModel, Name)
+
+    elif flags['is_steel_joist']:
+        # TODO: Steel joist function not available (or not found) in the OAPI
+        # output = sap2000.get_steel_joist_section(SapModel, Name) !!
+        pass
+
+    elif flags['is_SD']:
+        output = sap2000.get_SD_section(SapModel, Name)
+
+    elif flags['is_circle']:
+        output = sap2000.get_circle_section(SapModel, Name)
+
+    elif flags['is_hybrid_I']:
+        output = sap2000.get_hybrid_I_section(SapModel, Name)
+
+    elif flags['is_hybrid_U']:
+        # TODO
+        # Hybrid section manages data differently (with an array)
+        # IMPORTANT: IF ADDED, UPDATE THE allowed_properties in extract_FS_structure
+        pass
+
+    elif flags['is_trapezoidal']:
+        output = sap2000.get_trapezoidal_section(SapModel, Name)
+
+    elif flags['is_precastI']:
+        # TODO
+        # Precast section manages data differently
+        # IMPORTANT: IF ADDED, UPDATE THE allowed_properties in extract_FS_structure
+        pass
+
+    elif flags['is_precastU']:
+        # TODO
+        # Precast section manages data differently
+        # IMPORTANT: IF ADDED, UPDATE THE allowed_properties in extract_FS_structure
+        pass
+
+    elif flags['is_precastSuperT']:
+        # TODO: Precast Super-T handling if required
+        pass
+
+    elif flags['is_cold_C']:
+        output = sap2000.get_cold_C_section(SapModel, Name)
+
+    elif flags['is_cold_Z']:
+        output = sap2000.get_cold_Z_section(SapModel, Name)
+
+    elif flags['is_cold_Box']:
+        output = sap2000.get_cold_Box_section(SapModel, Name)
+
+    elif flags['is_cold_I']:
+        output = sap2000.get_cold_I_section(SapModel, Name)
+
+    elif flags['is_cold_L']:
+        output = sap2000.get_cold_L_section(SapModel, Name)
+
+    elif flags['is_cold_T']:
+        output = sap2000.get_cold_T_section(SapModel, Name)
+
+    elif flags['is_cold_Hat']:
+        output = sap2000.get_cold_Hat_section(SapModel, Name)
+
+    elif flags['is_cold_Pipe']:
+        output = sap2000.get_cold_pipe_section(SapModel, Name)
+
+    elif flags['is_General']:
+        output = sap2000.get_general_section(SapModel, Name)
+
+    elif flags['is_Nonprismatic']:
+        output = sap2000.get_nonprismatic_section(SapModel, Name)
+
+    elif flags['is_cover_plated_I']:
+        output = sap2000.get_cover_plated_I_section(SapModel, Name)
+
+    if output is None:
+        sap2000.raise_warning(
+            f"Frame property '{Name}' of type '{type_name}' could not be retrieved.",
+            1,
+        )
+        return {"flags": flags, "Type": section_type}
+
+    # Attach flags and type info
+    output.update(flags)
+    output["Type"] = section_type
+    return output
+
+
+def build_Psi_v2(sensors_nodes_correspondance, strain_modeshapes, interpolate_modeshapes=True):
+    """
+    Function Duties:
+        Obtains the matrix of mode shapes for the selected strain gauges
+    Input:
+        sensors_nodes_correspondance: dictionary with the correspondence between
+            the sensors and the elements. It is like:
+            {'Channel_1': {'x_sg': 0.1, 'location': 'right', 'Element': 1},
+            ...
+            }}
+            x_sg: local x_coordinate of the strain gauge in the element
+            location: location of the strain gauge in the element
+            Element: SAP2000 element in which the sg is located
+        strain_modeshapes: dictionary with the mode shapes coming from
+            sap2000.get_strainmodeshapes
+        interpolate_modeshapes: if True, the value of the strain coordinate is
+            interpolated according to x_sg
+    Output:
+        Psi: matrix of mode shapes for the selected strain gauges (dimensions
+            n_channels x n_modes)
+        Psi_id: list of strings with the element mesh names and location
+            (if interpolate_modeshapes is True, the value is not exactly
+            the same as indicated in strain_modeshapes)
+    """
+    interpolate_modeshapes = True
+    n_channels = len(sensors_nodes_correspondance)
+    n_modes = len(strain_modeshapes)
+    Psi = np.zeros((n_channels, n_modes))
+    Psi_id = list()
+    for channel, data in sensors_nodes_correspondance.items():
+        i_channel = list(sensors_nodes_correspondance).index(channel)
+        element, location, x_sg = data['Element'], data['location'], data['x_sg']
+        element = f'Element_{element}'
+        for i_mode, mode in enumerate(list(strain_modeshapes)):
+            x_all = strain_modeshapes[mode][element]['x']
+            mesh_id = strain_modeshapes[mode][element]['Mesh_id']
+            if location == 'up':
+                eps = strain_modeshapes[mode][element]['epsilon_1_3_up']
+            elif location == 'down':
+                eps = strain_modeshapes[mode][element]['epsilon_1_3_down']
+            elif location == 'left':
+                eps = strain_modeshapes[mode][element]['epsilon_1_2_left']
+            elif location == 'right':
+                eps = strain_modeshapes[mode][element]['epsilon_1_2_right']
+            i = np.argmin(np.abs(np.array(x_all) - x_sg))
+            if interpolate_modeshapes:
+                f_x = sp.interpolate.interp1d(x_all, eps, kind='linear')
+                eps_i = float(f_x(x_sg))
+            else:
+                eps_i = eps[i]
+            Psi[i_channel, i_mode] = eps_i
+            if i_mode == 0:
+                Psi_id.append(f"{mesh_id[i]}_{location}")
+    return Psi, Psi_id
+
+
+def get_strainmodeshapes(modal_forces, element_section, section_properties_material):
+    """
+    Function duties:
+    Computes the strain mode shapes as follow.
+        At each point we have:
+            Forces: P, M2, M3
+            Section properties: Area, S22, S33
+            Material properties: E
+        Navier Formula is applied; for that, it is important to know
+            what are the coordinates within the function.
+    Remark:
+        FOR THIS EXAMPLE, FUNCTION IS SUPPOSED TO BE RECTANGULAR
+        STRESSES ARE COMPUTED AT UPPER AND DOWN CENTERED POINTS,
+        AS WELL AS LEFT AND RIGHT CENTERED POINTS
+    Remark II: see "SAP2000_sign_convention" in "docs" folder for understanding eps
+        epsilon_up: eps in positive direction of X2; X3=0 (i.e. eps_2_pos)
+        epsilon_down: eps in negative direction of X2; X3=0 (i.e. eps_2_neg)
+        epsilon_right: eps in positive direction of X3; X2=0 (i.e. eps_3_pos)
+        epsilon_left: eps in negative direction of X3; X2=0 (i.e. eps_3_neg)
+    """
+    strain_modes = dict()
+    for mode_label in list(modal_forces):
+        strain_modes[mode_label] = dict()
+        for element_label in list(modal_forces[mode_label]):
+            # Dictionary initialization
+            strain_modes[mode_label][element_label] = dict()
+
+            # Get section name
+            element = element_label.replace("Element_", "")
+            SectionName = element_section[element]
+
+            # Section Properties
+            Area = section_properties_material[SectionName]["Geometry"]["Area"]
+            S22 = section_properties_material[SectionName]["Geometry"]["S22"]
+            S33 = section_properties_material[SectionName]["Geometry"]["S33"]
+
+            # Material Properties
+            E = section_properties_material[SectionName]["Material"]["E"]
+
+            # Forces and coordinates
+            P = modal_forces[mode_label][element_label]['P']
+            M3 = modal_forces[mode_label][element_label]['M3']
+            M2 = modal_forces[mode_label][element_label]['M2']
+            x = modal_forces[mode_label][element_label]['x']
+            mesh_id = modal_forces[mode_label][element_label]['Mesh_id']
+
+            # Stresses [!!!!! MADE FOR RECTANGULAR SECTION !!!!!!]
+            sigma_1_2_right = [P[i]/Area - M2[i]/S22 for i, _ in enumerate(P)]
+            sigma_1_2_left = [P[i]/Area + M2[i]/S22 for i, _ in enumerate(P)]
+            sigma_1_3_up = [P[i]/Area - M3[i]/S33 for i, _ in enumerate(P)]
+            sigma_1_3_down = [P[i]/Area + M3[i]/S33 for i, _ in enumerate(P)]
+
+            # Strains
+            epsilon_1_2_right = [i/E for i in sigma_1_2_right]
+            epsilon_1_2_left = [i/E for i in sigma_1_2_left]
+            epsilon_1_3_up = [i/E for i in sigma_1_3_up]
+            epsilon_1_3_down = [i/E for i in sigma_1_3_down]
+
+            # Save results
+            strain_modes[mode_label][element_label]["x"] = x
+            strain_modes[mode_label][element_label]["Mesh_id"] = mesh_id
+            strain_modes[mode_label][element_label]["epsilon_1_2_right"] = epsilon_1_2_right
+            strain_modes[mode_label][element_label]["epsilon_1_2_left"] = epsilon_1_2_left
+            strain_modes[mode_label][element_label]["epsilon_1_3_up"] = epsilon_1_3_up
+            strain_modes[mode_label][element_label]["epsilon_1_3_down"] = epsilon_1_3_down
+
+    return strain_modes
+
+
+def from_algorithm_parameters_to_sap2000_input(flat_input_data):
+    """
+    Parses a flat input dictionary into a structured dictionary with 'MP', 'JS', and 'FR' categories.
+        'MP': Stands for Material Properties
+        'JS': Stands for Joint Springs
+        'FR': Stands for Frame Releases
+        'FL': Stands for Frame Length
+        'FS': Stands for Frame Section
+        'AS': Stands for Area Section
+        'FOM': Stands for Frame Object Modifiers
+
+    Parameters
+    ----------
+    flat_input_data : dict
+        Flat dictionary with keys like 'MP/Steel/E', 'JS/supports/U1', 'FR/group/M2/jj',
+            'AS/section/Thickness', or 'FOM/1/A22', etc., and corresponding values.
+
+    Returns
+    -------
+    input_data : dict
+        Nested dictionary with structured input organized by 'MP', 'JS', and 'FR' sections.
+    """
+    input_data = {}
+
+    # Extract material properties, joint springs, and frame releases
+    input_data['MP'] = extract_MP_structure(flat_input_data)
+    input_data['JS'] = extract_JS_structure(flat_input_data)
+    input_data['FR'] = extract_FR_structure(flat_input_data)
+    input_data['FOM'] = extract_FOM_structure(flat_input_data)
+    input_data['FS'] = extract_FS_structure(flat_input_data)
+    input_data['FL'] = extract_FL_structure(flat_input_data)
+    input_data['AS'] = extract_AS_structure(flat_input_data)
+
+    # Adapt JS and FR for proper input in SAP2000 functions
+    input_data['JS'] = build_joint_spring_dict_from_JS(input_data['JS'])
+    input_data['FR'] = build_frame_release_dict_from_FR(input_data['FR'])
+
+    return input_data
+
+
+def extract_FS_structure(input_dict, name_FS='FS'):
+    """
+    Extracts frame section properties from flat input keys of the form:
+        'FS/<frame>/<property>' or 'FS/<frame>/<property>/<subproperty>'.
+
+    Supports:
+        - Modifiers with allowed subproperties (now combinable)
+        - Direct geometrical/mechanical properties (now combinable)
+        - Combined properties (concatenation of multiple allowed props)
+
+    Parameters
+    ----------
+    input_dict : dict
+        Flat dictionary with keys starting with 'name_FS'.
+
+    Returns
+    -------
+    dict
+        Nested dictionary in the format:
+        {frame: {property: value or {subproperty: value}}}.
+    """
+    allowed_properties = [
+        "t3", "t2", "tf", "tw", "t2b", "tfb",
+        "Thickness", "Radius", "LipDepth", "LipAngle",
+        "Area", "As2", "As3", "Torsion",
+        "I22", "I33", "S22", "S33", "Z22", "Z33",
+        "R22", "R33",
+        "StartSec", "EndSec", "MyLength", "MyType", "EI22", "EI33",
+        "FyTopFlange", "FyWeb", "FyBotFlange",   # yield strengths
+        "tc", "bc", "tcb", "bcb",
+    ]
+    allowed_modifiers = {'A', 'A2', 'A3', 'J', 'I2', 'I3', 'M', 'W'}
+
+    # all allowed properties are combinable
+    prop_pattern = '|'.join(sorted(allowed_properties, key=len, reverse=True))
+    mod_pattern = '|'.join(sorted(allowed_modifiers, key=len, reverse=True))
+
+    fs_data = defaultdict(lambda: defaultdict(dict))
+
+    for key, value in input_dict.items():
+        parts = key.split('/')
+
+        if parts[0] == name_FS and len(parts) in (3, 4):
+            _, frame, prop, *rest = parts
+
+            # Modifiers: FS/<section>/Modifiers/<subprop>
+            if prop == 'Modifiers':
+                if not rest:
+                    raise ValueError(f"[FS] Missing subproperty for Modifiers in key '{key}'.")
+                subprop = rest[0]
+
+                matches = re.findall(f'({mod_pattern})', subprop)
+                if matches and ''.join(matches) == subprop:
+                    for m in matches:
+                        fs_data[frame]['Modifiers'][m] = value
+                elif subprop in allowed_modifiers:
+                    fs_data[frame]['Modifiers'][subprop] = value
+                else:
+                    raise ValueError(
+                        f"[FS] Invalid subproperty '{subprop}' for Modifiers in '{key}'. "
+                        f"Allowed: {allowed_modifiers}"
+                    )
+
+            # Standard properties: FS/<section>/<prop>
+            else:
+                matches = re.findall(f'({prop_pattern})', prop)
+                if matches and ''.join(matches) == prop:
+                    for p in matches:
+                        fs_data[frame][p] = value
+                elif prop in allowed_properties:
+                    fs_data[frame][prop] = value
+                else:
+                    raise ValueError(
+                        f"[FS] Invalid property '{prop}' for frame '{frame}'. "
+                        f"Allowed properties: {sorted(allowed_properties)}"
+                    )
+
+    return convert_to_dict(fs_data)
+
+
+def extract_FOM_structure(input_dict, name_FOM='FOM'):
+    """
+    Extracts ONLY modifiers from flat input keys of the form:
+        'FOM/<frame>/<modifier>'  (where <modifier> can be combined)
+
+    Supports:
+        - Modifiers with allowed subproperties (combinable)
+
+    Parameters
+    ----------
+    input_dict : dict
+        Flat dictionary with keys starting with 'name_FOM'.
+
+    Returns
+    -------
+    dict
+        Nested dictionary in the format:
+        {frame: {'Modifiers': {modifier: value}}}.
+    """
+    allowed_modifiers = {'A', 'A2', 'A3', 'J', 'I2', 'I3', 'M', 'W'}
+    mod_pattern = '|'.join(sorted(allowed_modifiers, key=len, reverse=True))
+
+    fom_data = defaultdict(lambda: defaultdict(dict))
+
+    for key, value in input_dict.items():
+        parts = key.split('/')
+
+        # Only accept: FOM/<frame>/<modifier>
+        if parts[0] == name_FOM and len(parts) == 3:
+            _, frame, subprop = parts
+
+            matches = re.findall(f'({mod_pattern})', subprop)
+            if matches and ''.join(matches) == subprop:
+                for m in matches:
+                    fom_data[frame]['Modifiers'][m] = value
+            elif subprop in allowed_modifiers:
+                fom_data[frame]['Modifiers'][subprop] = value
+            else:
+                raise ValueError(
+                    f"[FOM] Invalid modifier '{subprop}' in '{key}'. "
+                    f"Allowed: {allowed_modifiers}"
+                )
+
+        elif parts[0] == name_FOM:
+            raise ValueError(
+                f"[FOM] Invalid key format '{key}'. Expected: "
+                f"'{name_FOM}/<frame>/<modifier>'."
+            )
+
+    return convert_to_dict(fom_data)
+
+
+def extract_MP_structure(input_dict, name_MP='MP'):
+    """
+    Extracts material properties from flat input keys of the form 'MP/<material>/<property>'.
+
+    Only allowed properties are:
+        'E': modulus of elasticity
+        'u': Poisson’s ratio
+        'a': thermal coefficient
+        'rho': density
+
+    Parameters
+    ----------
+    input_dict : dict
+        Flat dictionary with keys starting with 'name_MP'.
+
+    Returns
+    -------
+    dict
+        Nested dictionary in the format {material: {property: value}}.
+    """
+    allowed_properties = {'E', 'u', 'a', 'rho'}
+    mp_data = defaultdict(dict)
+
+    for key, value in input_dict.items():
+        parts = key.split('/')
+        if parts[0] == name_MP and len(parts) == 3:
+            _, material, prop = parts
+            if prop in allowed_properties:
+                mp_data[material][prop] = value
+            else:
+                raise ValueError(
+                    f"Invalid property '{prop}' for material '{material}'. "
+                    f"Allowed properties are: {sorted(allowed_properties)}"
+                )
+
+    return dict(mp_data)
+
+
+def extract_FL_structure(input_dict, name_FL='FL'):
+    """
+    Extracts frame length factor from flat input keys of the form 'FL/<group>/<ii or jj>'.
+
+    Only allowed properties are:
+        'ii': initial point moves (end point remains fixed)
+        'jj': end point moves (initial point remains fixed)
+
+    Parameters
+    ----------
+    input_dict : dict
+        Flat dictionary with keys starting with 'name_FL'.
+
+    Returns
+    -------
+    dict
+        Nested dictionary in the format {group: {length_factor: value}}.
+    """
+    allowed_properties = {'ii', 'jj'}
+    fl_data = defaultdict(dict)
+
+    for key, value in input_dict.items():
+        parts = key.split('/')
+        if parts[0] == name_FL and len(parts) == 3:
+            _, length_factor, prop = parts
+            if prop in allowed_properties:
+                fl_data[length_factor][prop] = value
+            else:
+                raise ValueError(
+                    f"Invalid property '{prop}' for frame length '{length_factor}'. "
+                    f"Allowed properties are: {sorted(allowed_properties)}"
+                )
+
+    return dict(fl_data)
+
+
+def extract_AS_structure(input_dict, name_AS='AS'):
+    """
+    Extracts area properties from flat input keys of the form 'AS/<area>/<property>'.
+
+    Supports assigning the same value to both 'Thickness' and 'Bending'
+    via a combined key (e.g., 'ThicknessBending').
+
+    Only allowed properties are:
+        'MatAngle': material angle (deg)
+        'Thickness': membrane thickness (if area shell) or plane thickness (if plane)
+        'Bending': bending thickness (if shell)
+        'Arc': The arc angle through which the area object is passed to define the asolid element [deg];
+            A value of zero means 1 radian (approximately 57.3 degrees).
+
+    Parameters
+    ----------
+    input_dict : dict
+        Flat dictionary with keys starting with 'name_AS'.
+
+    Returns
+    -------
+    dict
+        Nested dictionary in the format {area: {property: value}}.
+    """
+    allowed_properties = {'MatAngle', 'Thickness', 'Bending', 'Arc'}
+    combinable = {'Thickness', 'Bending'}
+    prop_pattern = '|'.join(sorted(combinable, key=len, reverse=True))
+
+    as_data = defaultdict(dict)
+
+    for key, value in input_dict.items():
+        parts = key.split('/')
+        if parts[0] == name_AS and len(parts) == 3:
+            _, area, prop = parts
+
+            # Handle combined properties (e.g., 'ThicknessBending')
+            matches = re.findall(f'({prop_pattern})', prop)
+            if matches and ''.join(matches) == prop:
+                for p in matches:
+                    if p not in allowed_properties:
+                        raise ValueError(f"[AS] Invalid property '{p}' in '{key}'.")
+                    as_data[area][p] = value
+            elif prop in allowed_properties:
+                as_data[area][prop] = value
+            else:
+                raise ValueError(
+                    f"[AS] Invalid property '{prop}' for area '{area}'. "
+                    f"Allowed properties: {sorted(allowed_properties)}"
+                )
+
+    return convert_to_dict(as_data)
+
+
+def extract_FR_structure(input_dict, name_FR='FR'):
+    """
+    Extracts and structures force and moment data from a dictionary
+    where keys follow the pattern '`name_FR`/<group>/<variables>/<ends>'.
+
+    Only two valid variable groups are allowed:
+    - Force: N, V2, V3
+    - Moment: T, M2, M3
+
+    Variables can be concatenated (e.g., 'M2M3' or 'NV2V3'), and the same value
+    is assigned to each. Ends can be 'ii' (for frame release in the ini_point of the
+    frame), 'jj' (for release in ending point), or both (e.g., 'iijj').
+
+    Parameters:
+        input_dict (dict): A dictionary with keys in the form 'FR/<group>/<variables>/<ends>' 
+                           and corresponding numeric values.
+
+    Returns:
+        dict: A nested dictionary mapping each group to its end identifiers, 
+              and those to their corresponding variables and values.
+
+    Raises:
+        ValueError: If any key contains invalid or mixed variable groups or invalid ends.
+    """
+    allowed_vars_F = {'N', 'V2', 'V3'}
+    allowed_vars_M = {'T', 'M2', 'M3'}
+    allowed_end = {'ii', 'jj'}
+
+    var_F_pattern = '|'.join(sorted(allowed_vars_F, key=len, reverse=True))
+    var_M_pattern = '|'.join(sorted(allowed_vars_M, key=len, reverse=True))
+    end_pattern = '|'.join(sorted(allowed_end, key=len, reverse=True))
+
+    fr_data = defaultdict(lambda: defaultdict(dict))
+
+    for key, value in input_dict.items():
+        parts = key.split('/')
+        if parts[0] == name_FR and len(parts) == 4:
+            _, group, var_concat, end_concat = parts
+
+            # Match variables: check against both groups
+            var_matches_F = re.findall(f'({var_F_pattern})', var_concat)
+            var_matches_M = re.findall(f'({var_M_pattern})', var_concat)
+
+            if ''.join(var_matches_F) == var_concat:
+                var_matches = var_matches_F
+            elif ''.join(var_matches_M) == var_concat:
+                var_matches = var_matches_M
+            else:
+                raise ValueError(
+                    f"[FR] Invalid or mixed variable group in key '{key}'. "
+                    f"Allowed groups: {allowed_vars_F} or {allowed_vars_M}"
+                )
+
+            # Match and validate ends
+            end_matches = re.findall(f'({end_pattern})', end_concat)
+            if not end_matches or ''.join(end_matches) != end_concat:
+                raise ValueError(
+                    f"[FR] Invalid end(s) in key '{key}'. Allowed: {allowed_end}")
+
+            # Assign value to each (end, variable) combination
+            for e in end_matches:
+                for v in var_matches:
+                    fr_data[group][e][v] = value
+
+    return convert_to_dict(fr_data)
+
+
+def convert_to_dict(d):
+    if isinstance(d, defaultdict):
+        d = {k: convert_to_dict(v) for k, v in d.items()}
+    elif isinstance(d, dict):
+        d = {k: convert_to_dict(v) for k, v in d.items()}
+    return d
+
+
+def extract_JS_structure(input_dict, name_JS='JS'):
+    """
+    Extracts and structures joint and rotational stiffness data from a dictionary 
+    where keys follow the pattern '`name_JS`/<group>/<variables>'.
+
+    Valid variable codes are U1, U2, U3, R1, R2, and R3. Multiple variables can be 
+    concatenated (e.g., 'U1U2'), in which case the same value is assigned to each.
+
+    Parameters:
+        input_dict (dict): A dictionary with keys in the form 'JS/<group>/<variables>' 
+                           and corresponding numeric values.
+
+    Returns:
+        dict: A nested dictionary where each group maps to its corresponding variables 
+              and values.
+
+    Raises:
+        ValueError: If any key contains invalid variable codes.
+    """
+    allowed_vars = {'U1', 'U2', 'U3', 'R1', 'R2', 'R3'}
+
+    var_pattern = '|'.join(sorted(allowed_vars, key=len, reverse=True))
+    js_data = defaultdict(dict)
+    for key, value in input_dict.items():
+        parts = key.split('/')
+        if parts[0] == name_JS and len(parts) == 3:
+            _, group, var = parts
+            matches = re.findall(f'({var_pattern})', var)
+            if not matches or ''.join(matches) != var:
+                raise ValueError(
+                    f"[JS] Invalid variable(s) in key '{key}'. Allowed: {allowed_vars}")
+            for v in matches:
+                js_data[group][v] = value
+
+    return convert_to_dict(js_data)
+
+
+def build_joint_spring_dict_from_JS(JS_dict):
+    """
+    Converts a structured JS_dict into the format required by `set_jointsprings`.
+
+    Parameters
+    ----------
+    JS_dict : dict
+        Dictionary of joint spring parameters as produced by extract_JS_structure.
+
+    Returns
+    -------
+    joint_spring_dict : dict
+        Dictionary where each key is a group name and value is a 6-element list:
+        [U1, U2, U3, R1, R2, R3]
+    """
+    joint_spring_dict = {}
+
+    for group, dof_dict in JS_dict.items():
+        # Start with zero stiffness for all 6 DOFs
+        k = [None] * 6
+
+        # Map input DOFs to their positions
+        dof_map = {'U1': 0, 'U2': 1, 'U3': 2, 'R1': 3, 'R2': 4, 'R3': 5}
+
+        for dof, value in dof_dict.items():
+            if dof in dof_map:
+                k[dof_map[dof]] = value
+            else:
+                raise ValueError(f"Invalid DOF '{dof}' in group '{group}'.")
+
+        joint_spring_dict[group] = k
+
+    return joint_spring_dict
+
+
+def build_frame_release_dict_from_FR(FR_dict):
+    """
+    Converts a structured FR_dict into the format required by `set_framereleases`.
+
+    Parameters
+    ----------
+    FR_dict : dict
+        Dictionary as returned by `extract_FR_structure`.
+
+    Returns
+    -------
+    frame_releases_dict : dict
+        Dictionary formatted for `set_framereleases`, with:
+        - ii, jj: lists of 6 booleans (release flags)
+        - StartValue, EndValue: lists of corresponding stiffness values
+    """
+    dof_order = ['N', 'V2', 'V3', 'T', 'M2', 'M3']
+
+    frame_releases_dict = {}
+
+    for group, ends in FR_dict.items():
+        group_data = {
+            'ii': [False] * 6,
+            'jj': [False] * 6,
+            'StartValue': [0.0] * 6,
+            'EndValue': [0.0] * 6
+        }
+
+        for end in ['ii', 'jj']:
+            if end in ends:
+                for var, value in ends[end].items():
+                    if var not in dof_order:
+                        raise ValueError(
+                            f"Invalid release variable '{var}' in group '{group}/{end}'.")
+                    idx = dof_order.index(var)
+                    group_data[end][idx] = True
+                    if end == 'ii':
+                        group_data['StartValue'][idx] = value
+                    else:
+                        group_data['EndValue'][idx] = value
+
+        frame_releases_dict[group] = group_data
+
+    return frame_releases_dict
+
+
+def check_updatable_parameters_groups(updatable_parameters, input_data_as_group, all_points, all_elements, SapModel):
+    """
+    Function Duties:
+        Checks if the keys in updatable_parameters exists as group or elements. If so, returns:
+            groups_dict:{key: bool} being True if the key is a group name, False otherwise (object
+            name).
+    Input:
+        updatable_parameters: list of updatable parameters (e.g. 'FR/<key>/...) where key is
+            expected to be a group name or an object name
+        input_data_as_group: dictionary specifying the object type for each of the items in which
+            apply
+            e.g., {'JS': 'point', 'FR': 'frame'} (add more in the future)
+        SapModel: SAP2000 model object
+    Output:
+        groups_dict: dictionary like:
+            {'JS': True, 'FR': False} ('JS' items are a group; 'FR' items are not a group)
+        Raise error if:
+        - A group name does not contain the object type (e.g. 'JS' group does not contain points)
+        - The key is not a group neither an object in the model
+    Future improvements:
+        Substitute all_points and all_elements by a class containing sap info
+    """
+    parameters_dict = {key: None for key in updatable_parameters}
+    input_data = from_algorithm_parameters_to_sap2000_input(
+        parameters_dict)
+
+    groups_dict = dict()
+
+    # Part 1: Check if groups exist and contain the object type
+    all_groups = sap2000.get_group_names(SapModel)
+    for item, obj_type in input_data_as_group.items():
+        groups_dict[item] = True  # by default we have group names
+        for key in input_data[item]:
+            if key in all_groups:
+                if not sap2000.group_contains_object_type(SapModel, key, obj_type):
+                    raise ValueError(f"Group {key} does not contain objects of type {obj_type} necessary to update {item}")
+            else:
+                groups_dict[item] = False  # assume keys are object names
+                break
+
+    # Part 2: Check if the objects exist in the model
+    for item, obj_type in input_data_as_group.items():
+        if not groups_dict[item]:
+            for key in input_data[item]:
+                list_obj = all_points if input_data_as_group[item] == 'point' else all_elements
+                if key not in list_obj:
+                    raise ValueError(
+                        f"Some names in input_data['{item}'] do not exist as group neither {obj_type} objects in the model.")
+                else:
+                    groups_dict[item] = False
+
+    return groups_dict
+
+
+
+def process_modal_results_fast(StepNum, Element, Station, P, M2, M3, Element_unique,
+                               StepNum_unique, average_values=True):
+    """
+    Function to be used inside sap2000.get_modal_forces()
+    Optimized version of the original code assisted by GPT to run faster
+    """
+    results = dict()
+    StepNum = np.array(StepNum)
+    Element = np.array(Element)
+    Station = np.array(Station)
+    P = np.array(P)
+    M2 = np.array(M2)
+    M3 = np.array(M3)
+
+    for mode in StepNum_unique:
+        mode_label = f'Mode_{int(mode)}'
+        results[mode_label] = dict()
+
+        # Precompute mode mask
+        mode_mask = StepNum == mode
+
+        for element in Element_unique:
+            element_label = f'Element_{int(element)}'
+
+            # Combined boolean mask
+            mask = mode_mask & (Element == element)
+            if not np.any(mask):
+                continue  # Skip if no data
+
+            station_vals = Station[mask]
+            p_vals = P[mask]
+            m2_vals = M2[mask]
+            m3_vals = M3[mask]
+
+            if average_values:
+                # Group by unique station values
+                unique_stations, inv_idx = np.unique(
+                    station_vals, return_inverse=True)
+                p_def = np.zeros_like(unique_stations, dtype=float)
+                m2_def = np.zeros_like(unique_stations, dtype=float)
+                m3_def = np.zeros_like(unique_stations, dtype=float)
+
+                for i in range(len(unique_stations)):
+                    idx = (inv_idx == i)
+                    p_def[i] = np.mean(p_vals[idx])
+                    m2_def[i] = np.mean(m2_vals[idx])
+                    m3_def[i] = np.mean(m3_vals[idx])
+
+                x = unique_stations.tolist()
+            else:
+                # Left-most appearance of each station value
+                _, index = np.unique(station_vals, return_index=True)
+                x = station_vals[index].tolist()
+                p_def = p_vals[index].tolist()
+                m2_def = m2_vals[index].tolist()
+                m3_def = m3_vals[index].tolist()
+
+            mesh = [f'{element}.{i}' for i in range(len(x))]
+
+            # Save results
+            results[mode_label][element_label] = {
+                'x': x,
+                'P': p_def,
+                'M2': m2_def,
+                'M3': m3_def,
+                'Mesh_id': mesh
+            }
+
+    return results
+
+
+def generate_sobol_samples_from_bounds(bounds_dict, n_samples, calc_second_order=False):
+    """
+    Generate Sobol samples for global sensitivity analysis from a dictionary of parameter bounds.
+
+    Parameters:
+    -----------
+    bounds_dict : dict
+        Dictionary of parameter bounds in the form:
+        {
+            'param_name1': [lower, upper],
+            'param_name2': [lower, upper],
+            ...
+        }
+
+    n_samples : int
+        Desired approximate total number of model evaluations.
+        The function will adjust this to match the structure required by SALib.
+
+    calc_second_order : bool, default=False
+        If True, includes second-order interaction effects in the sampling design.
+
+    Returns:
+    --------
+    param_samples_dict : dict
+        Dictionary mapping each parameter name to an array of sampled values.
+    param_values : np.ndarray
+        The full 2D array of shape (n_evals, num_params) with all sample combinations.
+    """
+    # SALib parameters
+    param_names = list(bounds_dict.keys())
+    bounds_list = [bounds_dict[name] for name in param_names]
+    p = len(param_names)
+
+    # Adjust base N to match target sample size
+    denominator = (2 * p + 2) if calc_second_order else (p + 2)
+    N_base = int(2 ** np.ceil(np.log2(n_samples / denominator)))
+    actual_samples = N_base * denominator
+
+    print(
+        f'[INFO] Adjusted total number of samples: {actual_samples} (N base = {N_base})')
+
+    # Define problem for SALib
+    problem = {
+        'num_vars': p,
+        'names': param_names,
+        'bounds': bounds_list
+    }
+
+    # Generate samples
+    param_values = sample(problem, N_base, calc_second_order=calc_second_order)
+
+    # Build dictionary of sampled values
+    param_samples_dict = {name: param_values[:, i]
+                          for i, name in enumerate(param_names)}
+
+    return param_samples_dict, param_values
+
+
+def generate_parameter_samples_from_algorithm_parameters(algorithm_parameters):
+    """
+    Generates a dictionary of parameter samples using the specified algorithm in `algorithm_parameters`.
+    Currently supports only 'sobol' sampling.
+
+    Parameters
+    ----------
+    algorithm_parameters : dict
+        Dictionary specifying the sampling configuration. It must include:
+            - 'algorithm': Name of the sampling algorithm (e.g., 'sobol').
+            - 'nsamples': Desired number of samples to generate.
+            - Parameter bounds: Keys ending having 'interv' on them that define lower and upper limits 
+            for each parameter as a list [min, max].
+
+        To apply sampling in logarithmic (base-10) space, append '_log10' to the parameter name.
+        This triggers log-scaling during sample generation and automatic inverse scaling afterwards.
+
+    Returns
+    -------
+    samples_dict : dict
+        Dictionary mapping FEM input parameter names to arrays of sampled values.
+    n_samples : int
+        The number of samples generated.
+
+    Remark:
+    The main function to be used is generate_sobol_samples_from_bounds
+    """
+    # Extract parameters
+    algorithm = algorithm_parameters['algorithm']
+    n_samples = algorithm_parameters['nsamples']
+
+    bounds_dict = {
+        key.replace('/interv', ''): value for key, value in algorithm_parameters.items()
+        if '/interv' in key and isinstance(value, list)
+    }
+
+    log10_flags = {key.replace(
+        '/log10', ''): True for key in bounds_dict if '/log10' in key}
+
+    # Remove '_log10' suffix from keys and apply log10 to interv
+    bounds_dict = {key.replace('/log10', ''): value for key,
+                   value in bounds_dict.items()}
+
+    for key in bounds_dict:
+        if log10_flags.get(key, False):
+            bounds_dict[key] = np.log10(np.maximum(bounds_dict[key], 1e-12))
+
+    # Generate samples using the specified algorithm
+    if algorithm == 'sobol':
+        # Extract parameters
+        calc_second_order = algorithm_parameters.get(
+            'calc_second_order', False)
+
+        # Generate samples
+        samples_dict, _ = generate_sobol_samples_from_bounds(
+            bounds_dict,
+            n_samples,
+            calc_second_order=calc_second_order
+        )
+        n_samples_generated = len(samples_dict[list(samples_dict.keys())[0]])
+
+        # Scale samples
+        for key in bounds_dict:
+            if log10_flags.get(key, False):
+                samples_dict[key] = 10**samples_dict[key]
+
+        return samples_dict, n_samples_generated
+
+    else:
+        raise ValueError(
+            f"Algorithm '{algorithm}' is not supported. Supported algorithms are: 'sobol'.")
+
+
+def generate_parameter_samples_from_algorithm_parameters_discrete(algorithm_parameters):
+    """
+    Similar logic as generate_parameter_samples_from_algorithm_parameters
+    Instead of generating with sobol, we hardcode to properly define damages
+    """
+    # Extract parameters
+    algorithm = algorithm_parameters['algorithm']
+    n_samples = algorithm_parameters['nsamples']
+
+    bounds_dict_aux = {
+        key.replace('/interv', ''): value for key, value in algorithm_parameters.items()
+        if '/interv' in key and isinstance(value, list)
+    }
+
+    if not all([bounds_dict_aux[list(bounds_dict_aux)[0]] == bounds_dict_aux[list(bounds_dict_aux)[i]] for i in range(len(bounds_dict_aux))]):
+        raise ValueError("All parameters must have the same number of discrete values for sampling.")
+
+    bounds_dict = {'values': bounds_dict_aux[list(bounds_dict_aux)[0]],
+                    'numbers': [0, len(bounds_dict_aux)]}
+
+    log10_flags = {key.replace(
+        '/log10', ''): True for key in bounds_dict if '/log10' in key}
+
+    # Remove '_log10' suffix from keys and apply log10 to interv
+    bounds_dict = {key.replace('/log10', ''): value for key,
+                   value in bounds_dict.items()}
+
+    for key in bounds_dict:
+        if log10_flags.get(key, False):
+            bounds_dict[key] = np.log10(np.maximum(bounds_dict[key], 1e-12))
+
+    # Generate samples using the specified algorithm
+    if algorithm == 'sobol':
+        # Extract parameters
+        n_elements = len(bounds_dict_aux)
+        n_values_element = int((n_samples / n_elements))
+        values = np.linspace(bounds_dict['values'][0], bounds_dict['values'][-1], n_values_element, endpoint=False)
+        values_expanded = np.tile(values, n_elements)
+        numbers_expanded = np.repeat(np.arange(n_elements), n_values_element)
+        n_samples_generated = len(values_expanded)
+
+        samples_dict = {'values': values_expanded, 'numbers': numbers_expanded}
+        # Scale samples
+        for key in bounds_dict:
+            if log10_flags.get(key, False):
+                samples_dict[key] = 10**samples_dict[key]
+
+        samples_dict_discrete = adapt_samples_for_discretizing(samples_dict, bounds_dict_aux)
+
+        return samples_dict_discrete, n_samples_generated
+
+    else:
+        raise ValueError(
+            f"Algorithm '{algorithm}' is not supported. Supported algorithms are: 'sobol'.")
+
+
+def adapt_samples_for_discretizing(samples_dict, bounds_dict_aux):
+    """
+    Build a per-bin representation of sample values for discretization.
+
+    Given `samples_dict` with NumPy arrays `numbers` (typically in [0, 40]) and
+    `values` (typically in [0, 1]), and a `bounds_dict_aux` whose keys define the
+    bin order (e.g., 40 bins of width 1), return a dict mapping each key to an
+    array `out` of the same length as `values` where:
+    - out[j] = values[j] if numbers[j] falls in that bin ([i-1, i) except last bin
+    which is [n_bins-1, n_bins] inclusive),
+    - out[j] = 1 otherwise.
+    """
+    numbers = samples_dict["numbers"]
+    values = samples_dict["values"]
+
+    keys = list(bounds_dict_aux.keys())
+    n_bins = len(keys)
+
+    samples_dict_adapted = {}
+
+    for i, k in enumerate(keys, start=1):
+        low = i - 1
+        high = i
+
+        if i < n_bins:
+            mask = (numbers >= low) & (numbers < high)
+        else:
+            mask = (numbers >= low) & (numbers <= high)
+
+        out = np.ones_like(values, dtype=values.dtype)
+        out[mask] = values[mask]
+
+        samples_dict_adapted[k] = out
+
+    return samples_dict_adapted
+
+
+def get_SGs_positions_dictionary(point_forces, load_pattern, all_elements_coord_connect):
+    """
+    Function Duties:
+        Constructs the dictionary of SGs positions.
+    Input:
+        point_forces : dict
+            Dictionary of point loads retrieved from SAP2000 (via get_point_loads_on_frame),
+            structured as: {element_name: {load_pattern: load_data}}.
+        load_pattern : str
+            The specific load pattern to extract information from (e.g. "DOFs_sg").
+        all_elements_coord_connect : dict
+            Dictionary containing coordinates of start (`Point_0`) and end (`Point_f`)
+            nodes of each frame element.
+    Output:
+        sg_channels : dict
+            Dictionary of SG channel properties. Each entry includes:
+            - x_sg: Location along the element where the SG is placed (absolute distance)
+            - location: Direction label ('up', 'down', 'left', 'right') based on force direction
+            - Point_0: Coordinates of the element's I-End
+            - Point_f: Coordinates of the element's J-End
+            - Element: Frame element name
+    Notes:
+        - Only local directions 2 and 3 are interpreted.
+        - If Dir > 3, a warning is printed (indicating use of global/projected coordinates).
+        - SG channels are sorted numerically by their channel number.
+    """
+    sg_channels = dict()
+
+    for element in point_forces:
+        info = point_forces[element][load_pattern]
+        Val = info['Val']
+        Dir = info['Dir']
+        x_sg = info['Dist']
+        if Dir == 2:
+            location = 'up' if Val < 0 else 'down'
+        elif Dir == 3:
+            location = 'right' if Val < 0 else 'left'
+        elif Dir > 3:
+            print(f"Warning: FORCES MUST BE DEFINED IN LOCAL COORDINATES")
+        Point_0_aux = all_elements_coord_connect[element]['Point_0']
+        Point_f_aux = all_elements_coord_connect[element]['Point_f']
+        Point_0 = {'x': Point_0_aux['x'],
+                   'y': Point_0_aux['y'], 'z': Point_0_aux['z']}
+        Point_f = {'x': Point_f_aux['x'],
+                   'y': Point_f_aux['y'], 'z': Point_f_aux['z']}
+        sg_channels[f'Channel_{int(abs(Val))}'] = {
+            'x_sg': x_sg, 'location': location, 'Point_0': Point_0,
+            'Point_f': Point_f, 'Element': element
+        }
+    # Sort dictionary
+    sorted_items = sort_string_separated_by(list(sg_channels), separator='_')
+    sg_channels = {key: sg_channels[key] for key in sorted_items}
+
+    return sg_channels
+
+
+def read_parameters(file_path):
+    """
+    Function Duties:
+        Read bayesian_inference_parameters.txt file
+    """
+    parameters = dict()
+    constraint_counter = 0
+    with open(file_path, 'r') as file:
+        for line in file:
+            # Remove comments and strip whitespace
+            line = line.split('#')[0].strip()
+            if line:  # Skip empty lines
+                key, value = line.split('=')
+                key = key.strip()
+                value = value.strip()
+                if value == 'None':
+                    parameters[key] = None
+                elif 'filename' in key:
+                    parameters[key] = value
+                elif 'constraint' in key and any(op in value for op in ['<', '>']):
+                    constraint_counter += 1
+                    key = f'constraint_{constraint_counter}'
+                    parameters[key] = value
+                elif 'constraint' in key and '==' in value:
+                    raise ValueError(
+                        f"Invalid constraint format in {file_path}: '{key}' uses the unsupported '==' operator.\n"
+                        "Note: If two variables should take the same value, place them on the same group and/or assign them jointly in the input file.\n"
+                        "For example:\n"
+                        "    FR/releasebeams_top/M2M3/ii/ini_guess = 1e5"
+                    )
+                else:
+                    parameters[key] = safe_eval(value)
+    return parameters
+
+
+def safe_eval(value):
+    """
+    Function Duties:
+        Safely evaluate a string as a literal or expression
+    """
+    try:
+        # Try to evaluate the value as a literal
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        # If that fails, use eval to handle expressions like 10**6
+        return eval(value)
+
+
+def read_matrices_h5py(h5py_filename, groups):
+    """
+    Read matrices from a h5py file
+    """
+    with h5py.File(h5py_filename, 'r') as h5py_file:
+        matrices = dict()
+        for group in groups:
+            matrices[group] = h5py_file[group][:]
+    return matrices
+
+
+
+def save_json_serialized(obj, filepath, omit_keys=None) -> None:
+    serial = serialize_dictionary_v2(obj, omit_keys=omit_keys)
+    with open(filepath, 'w') as f:
+        json.dump(serial, f, indent=2)
+
+
+def load_json_serialized(filepath):
+    with open(filepath, 'r') as f:
+        return from_serializable(json.load(f))
+
+
+def from_serializable(obj):
+    """
+    Deserializes objects encoded by `to_serializable`, restoring NumPy arrays,
+    complex numbers, and nested structures to native Python types.
+
+    Remark: enhanced version of deserilize_dict
+    """
+    if isinstance(obj, dict):
+        if "__complex__" in obj:
+            return complex(obj["real"], obj["imag"])
+        elif "__complex_array__" in obj:
+            return np.array(obj["real"]) + 1j * np.array(obj["imag"])
+        else:
+            return {k: from_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        # Try converting to ndarray if list of numbers or complex values
+        converted = [from_serializable(v) for v in obj]
+        if all(isinstance(x, (float, int, complex, np.number)) for x in converted):
+            return np.array(converted)
+        elif all(isinstance(x, np.ndarray) for x in converted):
+            try:
+                return np.stack(converted)
+            except Exception:
+                return converted  # fallback: list of arrays
+        return converted
+    return obj
+
+
+def serialize_dictionary_v2(test_dict, omit_keys=None):
+    """
+    Converts a dictionary into a JSON-serializable format, handling complex numbers,
+    NumPy arrays, and other non-native JSON types.
+
+    Parameters
+    ----------
+    test_dict : dict
+        The dictionary containing results for one test (e.g., signal processing, FDD results).
+    omit_keys : str or list of str, optional
+        Key(s) to exclude from serialization (e.g., 'FDD' to avoid saving bulky internal data).
+
+    Returns
+    -------
+    test_dict_serializable : dict
+        A cleaned and fully JSON-compatible dictionary, suitable for writing to file.
+    """
+    if omit_keys is None:
+        omit_keys = []
+    elif isinstance(omit_keys, str):
+        omit_keys = [omit_keys]
+
+    test_dict_serializable = {}
+    for key, value in test_dict.items():
+        if key in omit_keys:
+            continue
+        test_dict_serializable[key] = to_serializable(value)
+
+    return test_dict_serializable
+
+
+def to_serializable(obj):
+    """
+    Converts NumPy arrays, complex numbers, and nested structures into
+    JSON-compatible formats for safe serialization.
+    """
+    if isinstance(obj, np.ndarray):
+        if np.iscomplexobj(obj):
+            return {
+                "__complex_array__": True,
+                "real": obj.real.tolist(),
+                "imag": obj.imag.tolist()
+            }
+        else:
+            return obj.tolist()
+    elif isinstance(obj, complex):
+        return {"__complex__": True, "real": obj.real, "imag": obj.imag}
+    elif isinstance(obj, (np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.int32, np.int64)):
+        return int(obj)
+    elif isinstance(obj, dict):
+        return {k: to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [to_serializable(v) for v in obj]
+    return obj
+
+
+def backup_existing_output_files(output_path, files_to_backup) -> None:
+    """
+    Creates a timestamped backup directory inside `output_path` and moves existing files into it.
+
+    Parameters
+    ----------
+    output_path : str
+        Path where the output files are stored and where the backup folder will be created.
+
+    files_to_backup : list of str
+        List of filenames (not full paths) to check and move into the backup folder if they exist.
+    """
+    # Create timestamped backup folder
+    date_time_str = datetime.now().strftime('%Y%m%d_%H%M')
+    backup_path = os.path.join(output_path, f'backup_{date_time_str}')
+    os.makedirs(backup_path, exist_ok=True)
+
+    for file in files_to_backup:
+        file_path = os.path.join(output_path, file)
+        if file in os.listdir(output_path):
+            backup_file_path = os.path.join(backup_path, file)
+            if file in os.listdir(backup_path):
+                os.remove(backup_file_path)
+            shutil.move(file_path, backup_path)
+
+
+def save_state(state, filepath):
+    """Save the current state to a file."""
+    with open(filepath, 'w') as f:
+        json.dump(state, f)
+    print(f"State saved to {filepath}")
+
+
+def load_state(filepath):
+    """Load the state from a file."""
+    if os.path.exists(filepath):
+        with open(filepath, 'r') as f:
+            state = json.load(f)
+        print(f"State loaded from {filepath}")
+        return state
+    return None
+
+
+def remove_file(file_path):
+    """Remove a file if it exists."""
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        print(f"Removed file: {file_path}")
+
+def get_username():
+    """
+    Get the username from the .env file
+    """
+    load_dotenv(override=True)  # loads variables from .env file
+    username = os.getenv('USERNAME')
+    return username
+
+
+
+def get_sectionproperties_material(section_properties, section_material,
+                                   material_properties):
+    """
+    Input:
+        section_properties: dictionary containing geometric properties
+            associated to each section (from get_sectionproperties function)
+        section_material: dictionary containing which material is associated
+            to each section (from get_material_I_section)
+        material_properties: dictionary containing physical properties
+            associated to each material (from get_material_properties function)
+    Return:
+        Dictionary with all aggregated information
+    """
+
+    section_properties_material = dict()
+    for section in list(section_properties):
+        material = section_material[section]
+        mat_props = material_properties[material]
+        sect_props = section_properties[section]
+        section_properties_material[section] = dict()
+        section_properties_material[section]['Geometry'] = sect_props
+        section_properties_material[section]['Material'] = mat_props
+
+    return section_properties_material
+
+
+def get_areaproperties_material(area_section_properties,
+                                material_properties):
+    """
+    Input:
+        area_section_properties: dictionary containing all geometric properties
+        material_properties: dictionary containing physical properties
+            associated to each material (from get_material_properties function)
+    Return:
+        Dictionary with all aggregated information (respecting the formatting used for
+        frame elements)
+    """
+    area_properties_material = dict()
+    for area in area_section_properties:
+        area_properties_material[area] = {
+            'Geometry': copy.deepcopy(area_section_properties[area]),
+            'Material': copy.deepcopy(material_properties[area_section_properties[area]['MatProp']])
+        }
+
+    return area_properties_material
+
+
+def get_paths(csv):
+    """
+    Function duties:
+        Get dictionary with paths
+    """
+
+    paths_df = pd.read_csv(csv, sep=';', comment='#')
+    paths = dict()
+
+    for var in list(paths_df.VarName):
+        i = list(paths_df.VarName).index(var)
+        path_value = paths_df.Path[i]
+        if ":" not in path_value:
+            path_value = os.path.join(
+                paths_df[paths_df['VarName'] == 'project']['Path'].iloc[0], path_value)
+        paths[var] = path_value
+
+    return paths
 
 def kill_process_advanced(process_name):
     """Kills the specified process and its subprocesses."""
